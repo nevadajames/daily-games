@@ -1,0 +1,1047 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CRYSTAL CLIMB</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #0a0010;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      overflow: hidden;
+      font-family: 'Courier New', monospace;
+    }
+    canvas {
+      display: block;
+      image-rendering: pixelated;
+    }
+  </style>
+</head>
+<body>
+<canvas id="gameCanvas"></canvas>
+<script>
+// Genre: Platformer | Date: 2026-04-09
+// CRYSTAL CLIMB — Neon platformer: collect crystals, reach the portal each level!
+// Controls: Arrow Keys / WASD to move, Space / Up / W to jump
+
+// ─── roundRect polyfill ───────────────────────────────────────────────────
+if (!CanvasRenderingContext2D.prototype.roundRect) {
+  CanvasRenderingContext2D.prototype.roundRect = function(x, y, w, h, r) {
+    r = Math.min(r, w / 2, h / 2);
+    this.beginPath();
+    this.moveTo(x + r, y);
+    this.lineTo(x + w - r, y);
+    this.quadraticCurveTo(x + w, y, x + w, y + r);
+    this.lineTo(x + w, y + h - r);
+    this.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+    this.lineTo(x + r, y + h);
+    this.quadraticCurveTo(x, y + h, x, y + h - r);
+    this.lineTo(x, y + r);
+    this.quadraticCurveTo(x, y, x + r, y);
+    this.closePath();
+  };
+}
+
+// ─── Canvas setup & responsive scaling ────────────────────────────────────
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+
+const BASE_W = 800;
+const BASE_H = 560;
+let scale = 1;
+
+function resizeCanvas() {
+  const wRatio = window.innerWidth  / BASE_W;
+  const hRatio = window.innerHeight / BASE_H;
+  scale = Math.min(wRatio, hRatio);
+  canvas.width  = BASE_W;
+  canvas.height = BASE_H;
+  canvas.style.width  = (BASE_W * scale) + 'px';
+  canvas.style.height = (BASE_H * scale) + 'px';
+}
+resizeCanvas();
+window.addEventListener('resize', resizeCanvas);
+
+// ─── Input ────────────────────────────────────────────────────────────────
+const keys = {};
+window.addEventListener('keydown', e => {
+  keys[e.code] = true;
+  // advance screens on any key
+  if (gameState === 'title' || gameState === 'gameover' || gameState === 'levelclear') {
+    handleScreenAdvance();
+  }
+  // prevent page scroll for game keys
+  if (['Space','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.code)) {
+    e.preventDefault();
+  }
+});
+window.addEventListener('keyup', e => { keys[e.code] = false; });
+
+// ─── Game constants ────────────────────────────────────────────────────────
+const GRAVITY     = 0.55;
+const JUMP_FORCE  = -12.5;
+const MOVE_SPEED  = 4.5;
+const COYOTE_TIME = 8;   // frames of grace after walking off platform
+const JUMP_BUFFER = 10;  // frames of grace for early jump input
+
+// ─── Color palette (neon deep-space) ──────────────────────────────────────
+const C = {
+  bg:        '#07000f',
+  bgGrad1:   '#0d0020',
+  bgGrad2:   '#07000f',
+  platform:  '#1a0050',
+  platEdge:  '#7b2fff',
+  platTop:   '#a855f7',
+  player:    '#00eeff',
+  playerSh:  '#005566',
+  crystal:   ['#ff4ef7','#ffee00','#00ff99','#ff7700'],
+  crystalGl: ['#ff9af9','#fff480','#80ffc0','#ffbb66'],
+  portal:    '#00ff88',
+  portalRim: '#ffffff',
+  hud:       '#e0d0ff',
+  lives:     '#ff4ef7',
+  scoreClr:  '#00eeff',
+  star:      '#ffffff',
+  danger:    '#ff3344',
+  spike:     '#ff2244',
+  spikeBase: '#661122',
+  moving:    '#2200aa',
+  movEdge:   '#6644ff',
+  movTop:    '#9977ff',
+};
+
+// ─── Particle system ──────────────────────────────────────────────────────
+let particles = [];
+
+function spawnParticles(x, y, color, count, speedMult) {
+  for (let i = 0; i < count; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const speed = (1 + Math.random() * 3) * (speedMult || 1);
+    particles.push({
+      x, y,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed,
+      color,
+      alpha: 1,
+      size: 2 + Math.random() * 3,
+      life: 0.7 + Math.random() * 0.5,
+    });
+  }
+}
+
+function updateParticles(dt) {
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx;
+    p.y += p.vy;
+    p.vy += 0.12;
+    p.life -= dt * 1.5;
+    p.alpha = Math.max(0, p.life);
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+}
+
+function drawParticles() {
+  for (const p of particles) {
+    ctx.save();
+    ctx.globalAlpha = p.alpha;
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+// ─── Stars (background) ────────────────────────────────────────────────────
+const STARS = [];
+for (let i = 0; i < 120; i++) {
+  STARS.push({
+    x: Math.random() * BASE_W,
+    y: Math.random() * BASE_H,
+    r: Math.random() * 1.5 + 0.3,
+    alpha: 0.3 + Math.random() * 0.7,
+    twinkle: Math.random() * Math.PI * 2,
+    speed: 0.02 + Math.random() * 0.04,
+  });
+}
+
+function drawBackground(t) {
+  // Sky gradient
+  const grad = ctx.createLinearGradient(0, 0, 0, BASE_H);
+  grad.addColorStop(0, '#0d0025');
+  grad.addColorStop(1, '#07000f');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, BASE_W, BASE_H);
+
+  // Stars
+  for (const s of STARS) {
+    s.twinkle += s.speed;
+    const a = s.alpha * (0.6 + 0.4 * Math.sin(s.twinkle));
+    ctx.save();
+    ctx.globalAlpha = a;
+    ctx.fillStyle = C.star;
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+// ─── Level definitions ─────────────────────────────────────────────────────
+// Each platform: { x, y, w, h, moving?, range?, speed? }
+// Each crystal:  { x, y, collected }
+// Portal: { x, y }
+// Spikes: { x, y, w }
+
+function makeLevels() {
+  return [
+    // Level 1 – Tutorial – wide, safe platforms
+    {
+      platforms: [
+        { x: 0,   y: 520, w: 800, h: 40 },           // ground
+        { x: 100, y: 420, w: 140, h: 18 },
+        { x: 310, y: 350, w: 160, h: 18 },
+        { x: 520, y: 270, w: 150, h: 18 },
+        { x: 280, y: 190, w: 130, h: 18 },
+        { x: 80,  y: 130, w: 120, h: 18 },
+        { x: 340, y: 70,  w: 120, h: 18 },
+      ],
+      crystals: [
+        {x:140,y:390},{x:200,y:390},{x:380,y:320},{x:440,y:320},
+        {x:570,y:240},{x:330,y:160},{x:390,y:160},{x:120,y:100},
+        {x:380,y:40},{x:430,y:40},
+      ],
+      portal: { x: 390, y: 30 },
+      spikes: [],
+    },
+    // Level 2 – Moving platforms debut
+    {
+      platforms: [
+        { x: 0,   y: 520, w: 800, h: 40 },
+        { x: 50,  y: 430, w: 120, h: 18 },
+        { x: 250, y: 370, w: 110, h: 18, moving: true, range: 120, speed: 1.5 },
+        { x: 470, y: 300, w: 100, h: 18 },
+        { x: 300, y: 220, w: 120, h: 18, moving: true, range: 100, speed: 2.0 },
+        { x: 100, y: 150, w: 110, h: 18 },
+        { x: 340, y: 80,  w: 130, h: 18 },
+        { x: 580, y: 150, w: 110, h: 18, moving: true, range: 80, speed: 1.8 },
+        { x: 550, y: 60,  w: 110, h: 18 },
+      ],
+      crystals: [
+        {x:90,y:400},{x:295,y:340},{x:510,y:270},{x:340,y:190},
+        {x:360,y:190},{x:140,y:120},{x:380,y:50},{x:590,y:120},
+        {x:620,y:30},{x:590,y:30},
+      ],
+      portal: { x: 600, y: 20 },
+      spikes: [
+        { x: 200, y: 517, w: 40 },
+        { x: 600, y: 517, w: 50 },
+      ],
+    },
+    // Level 3 – Gaps & spikes, tighter platforms
+    {
+      platforms: [
+        { x: 0,   y: 520, w: 180, h: 40 },
+        { x: 260, y: 520, w: 160, h: 40 },
+        { x: 500, y: 520, w: 300, h: 40 },
+        { x: 60,  y: 430, w: 100, h: 18 },
+        { x: 230, y: 360, w: 90,  h: 18, moving: true, range: 110, speed: 2.2 },
+        { x: 430, y: 290, w: 90,  h: 18 },
+        { x: 600, y: 220, w: 100, h: 18, moving: true, range: 80, speed: 2.5 },
+        { x: 350, y: 160, w: 100, h: 18 },
+        { x: 150, y: 100, w: 90,  h: 18 },
+        { x: 360, y: 40,  w: 120, h: 18 },
+      ],
+      crystals: [
+        {x:90,y:400},{x:275,y:330},{x:465,y:260},{x:640,y:190},
+        {x:380,y:130},{x:180,y:70},{x:400,y:10},{x:450,y:10},
+        {x:540,y:490},{x:290,y:490},
+      ],
+      portal: { x: 410, y: 0 },
+      spikes: [
+        { x: 185, y: 517, w: 70 },
+        { x: 425, y: 517, w: 70 },
+        { x: 380, y: 267, w: 50 },  // on platform
+      ],
+    },
+    // Level 4 – Fast movers, lots of spikes
+    {
+      platforms: [
+        { x: 0,   y: 520, w: 120, h: 40 },
+        { x: 200, y: 520, w: 120, h: 40 },
+        { x: 400, y: 520, w: 120, h: 40 },
+        { x: 600, y: 520, w: 200, h: 40 },
+        { x: 50,  y: 420, w: 100, h: 18, moving: true, range: 90,  speed: 2.8 },
+        { x: 300, y: 350, w: 90,  h: 18 },
+        { x: 500, y: 280, w: 90,  h: 18, moving: true, range: 130, speed: 3.0 },
+        { x: 180, y: 220, w: 100, h: 18, moving: true, range: 80,  speed: 2.5 },
+        { x: 400, y: 150, w: 90,  h: 18 },
+        { x: 200, y: 80,  w: 90,  h: 18 },
+        { x: 420, y: 40,  w: 120, h: 18 },
+      ],
+      crystals: [
+        {x:90,y:390},{x:335,y:320},{x:545,y:250},{x:220,y:190},
+        {x:440,y:120},{x:240,y:50},{x:460,y:10},{x:510,y:10},
+        {x:640,y:490},{x:680,y:490},
+      ],
+      portal: { x: 470, y: 0 },
+      spikes: [
+        { x: 125, y: 517, w: 70 },
+        { x: 325, y: 517, w: 70 },
+        { x: 525, y: 517, w: 70 },
+        { x: 280, y: 327, w: 40 },
+        { x: 410, y: 127, w: 40 },
+      ],
+    },
+    // Level 5 – Grand finale: everything together, tricky layout
+    {
+      platforms: [
+        { x: 0,   y: 520, w: 100, h: 40 },
+        { x: 200, y: 520, w: 80,  h: 40 },
+        { x: 380, y: 520, w: 80,  h: 40 },
+        { x: 550, y: 520, w: 80,  h: 40 },
+        { x: 680, y: 520, w: 120, h: 40 },
+        { x: 30,  y: 440, w: 80,  h: 18, moving: true, range: 100, speed: 2.5 },
+        { x: 250, y: 380, w: 80,  h: 18 },
+        { x: 450, y: 310, w: 80,  h: 18, moving: true, range: 120, speed: 3.0 },
+        { x: 600, y: 240, w: 80,  h: 18 },
+        { x: 320, y: 200, w: 80,  h: 18, moving: true, range: 90,  speed: 3.5 },
+        { x: 120, y: 140, w: 80,  h: 18 },
+        { x: 330, y: 80,  w: 80,  h: 18, moving: true, range: 100, speed: 3.0 },
+        { x: 560, y: 110, w: 100, h: 18 },
+        { x: 380, y: 30,  w: 100, h: 18 },
+      ],
+      crystals: [
+        {x:60,y:410},{x:285,y:350},{x:485,y:280},{x:635,y:210},
+        {x:355,y:170},{x:150,y:110},{x:365,y:50},{x:600,y:80},
+        {x:415,y:0},{x:245,y:490},
+      ],
+      portal: { x: 420, y: -10 },
+      spikes: [
+        { x: 105, y: 517, w: 90 },
+        { x: 285, y: 517, w: 90 },
+        { x: 465, y: 517, w: 80 },
+        { x: 235, y: 357, w: 40 },
+        { x: 590, y: 217, w: 40 },
+      ],
+    },
+  ];
+}
+
+// ─── Game state ────────────────────────────────────────────────────────────
+let gameState = 'title';  // 'title' | 'playing' | 'levelclear' | 'gameover'
+let score, lives, levelIndex, levels;
+let player, platforms, crystals, portal, spikes;
+let levelClearTimer, gameOverTimer;
+let highScore = 0;
+let totalCrystals, collectedCrystals;
+let levelTime;
+let blink = 0;
+let portalPulse = 0;
+let screenFlash = 0;
+
+function initGame() {
+  score  = 0;
+  lives  = 3;
+  levelIndex = 0;
+  levels = makeLevels();
+  particles = [];
+  loadLevel(levelIndex);
+}
+
+function loadLevel(idx) {
+  const lvl = levels[idx];
+  // deep-clone so moving platforms reset
+  platforms = lvl.platforms.map(p => ({ ...p, origX: p.x, dir: 1 }));
+  crystals  = lvl.crystals.map(c => ({ ...c, collected: false, wobble: Math.random() * Math.PI * 2 }));
+  portal    = { ...lvl.portal, active: true };
+  spikes    = lvl.spikes ? lvl.spikes.map(s => ({ ...s })) : [];
+  totalCrystals = crystals.length;
+  collectedCrystals = 0;
+  levelTime = 0;
+
+  // Spawn player on first platform (ground level area)
+  player = {
+    x: 60, y: 460,
+    w: 24, h: 32,
+    vx: 0, vy: 0,
+    onGround: false,
+    coyote: 0,
+    jumpBuffer: 0,
+    jumping: false,
+    facing: 1,
+    animFrame: 0,
+    animTimer: 0,
+    invincible: 0,
+    trail: [],
+  };
+}
+
+// ─── Collision ─────────────────────────────────────────────────────────────
+function rectOverlap(ax, ay, aw, ah, bx, by, bw, bh) {
+  return ax < bx + bw && ax + aw > bx && ay < by + bh && ay + ah > by;
+}
+
+function platformCollide(p, pl) {
+  // Only land on top
+  const prevBottom = p.y + p.h - p.vy;
+  const bottom     = p.y + p.h;
+  if (
+    p.vx * 0 === 0 && // always true, just structured
+    bottom >= pl.y &&
+    prevBottom <= pl.y + 4 &&
+    p.x + p.w > pl.x + 4 &&
+    p.x < pl.x + pl.w - 4
+  ) {
+    p.y  = pl.y - p.h;
+    p.vy = 0;
+    p.onGround = true;
+    // Ride moving platform
+    if (pl.moving) p.x += pl.vx || 0;
+    return true;
+  }
+  return false;
+}
+
+// ─── Update ────────────────────────────────────────────────────────────────
+let lastTime = 0;
+
+function update(timestamp) {
+  const dt = Math.min((timestamp - lastTime) / 16.67, 3); // delta in ~frames
+  lastTime = timestamp;
+
+  if (gameState !== 'playing') {
+    blink += dt * 0.04;
+    requestAnimationFrame(update);
+    draw(timestamp);
+    return;
+  }
+
+  blink += dt * 0.04;
+  levelTime += dt / 60;
+  portalPulse += dt * 0.07;
+  if (screenFlash > 0) screenFlash -= dt * 0.05;
+
+  // ── Update moving platforms ──
+  for (const pl of platforms) {
+    if (!pl.moving) { pl.vx = 0; continue; }
+    pl.x  += pl.speed * pl.dir;
+    pl.vx  = pl.speed * pl.dir;
+    if (pl.x > pl.origX + pl.range || pl.x < pl.origX - pl.range / 2) {
+      pl.dir *= -1;
+    }
+  }
+
+  // ── Player input ──
+  const moveLeft  = keys['ArrowLeft']  || keys['KeyA'];
+  const moveRight = keys['ArrowRight'] || keys['KeyD'];
+  const jumpKey   = keys['Space'] || keys['ArrowUp'] || keys['KeyW'];
+
+  // Horizontal
+  if (moveLeft)  { player.vx = -MOVE_SPEED; player.facing = -1; }
+  else if (moveRight) { player.vx = MOVE_SPEED; player.facing = 1; }
+  else { player.vx *= 0.7; } // friction
+
+  // Jump buffer
+  if (jumpKey) { player.jumpBuffer = JUMP_BUFFER; }
+  else if (player.jumpBuffer > 0) player.jumpBuffer -= dt;
+
+  // Coyote time
+  if (player.onGround) { player.coyote = COYOTE_TIME; }
+  else if (player.coyote > 0) player.coyote -= dt;
+
+  // Execute jump
+  if (player.jumpBuffer > 0 && player.coyote > 0) {
+    player.vy = JUMP_FORCE;
+    player.jumpBuffer = 0;
+    player.coyote = 0;
+    player.jumping = true;
+    spawnParticles(player.x + player.w / 2, player.y + player.h, C.platTop, 6, 0.6);
+  }
+  // Variable jump height: release early = shorter jump
+  if (!jumpKey && player.jumping && player.vy < -3) {
+    player.vy *= 0.82;
+  }
+  if (player.vy >= 0) player.jumping = false;
+
+  // Gravity
+  player.vy += GRAVITY * dt;
+  player.vy  = Math.min(player.vy, 18); // terminal velocity
+
+  // Move player
+  player.x += player.vx * dt;
+  player.y += player.vy * dt;
+
+  // Clamp X
+  player.x = Math.max(0, Math.min(BASE_W - player.w, player.x));
+
+  // Platform collision
+  player.onGround = false;
+  for (const pl of platforms) {
+    platformCollide(player, pl);
+  }
+
+  // Trail
+  player.trail.push({ x: player.x + player.w / 2, y: player.y + player.h / 2, alpha: 0.5 });
+  if (player.trail.length > 8) player.trail.shift();
+  for (const t of player.trail) t.alpha -= 0.07;
+
+  // Animation
+  player.animTimer += dt;
+  if (player.animTimer > 8) { player.animTimer = 0; player.animFrame = (player.animFrame + 1) % 4; }
+
+  // Invincibility frames
+  if (player.invincible > 0) player.invincible -= dt;
+
+  // ── Crystal collection ──
+  for (const c of crystals) {
+    if (c.collected) continue;
+    c.wobble += dt * 0.08;
+    const cy = c.y + Math.sin(c.wobble) * 4;
+    if (rectOverlap(player.x, player.y, player.w, player.h, c.x - 10, cy - 10, 20, 20)) {
+      c.collected = true;
+      collectedCrystals++;
+      score += 100;
+      spawnParticles(c.x, cy, C.crystal[collectedCrystals % C.crystal.length], 12);
+    }
+  }
+
+  // ── Spike collision ──
+  if (player.invincible <= 0) {
+    for (const s of spikes) {
+      // Spike hitbox slightly inset
+      if (rectOverlap(player.x + 4, player.y + 4, player.w - 8, player.h - 4,
+                      s.x + 2, s.y, s.w - 4, 14)) {
+        hitPlayer();
+      }
+    }
+  }
+
+  // ── Fall off screen ──
+  if (player.y > BASE_H + 60) {
+    hitPlayer();
+  }
+
+  // ── Portal collision ──
+  const portalW = 34, portalH = 44;
+  if (rectOverlap(player.x + 4, player.y + 4, player.w - 8, player.h - 8,
+                  portal.x - portalW/2, portal.y - portalH/2, portalW, portalH)) {
+    levelClear();
+  }
+
+  // ── Particles ──
+  updateParticles(dt);
+
+  draw(timestamp);
+  requestAnimationFrame(update);
+}
+
+function hitPlayer() {
+  lives--;
+  player.invincible = 80;
+  screenFlash = 1;
+  spawnParticles(player.x + player.w/2, player.y + player.h/2, C.danger, 15, 1.5);
+  // Reset position
+  player.x  = 60; player.y = 460;
+  player.vx = 0;  player.vy = 0;
+  if (lives <= 0) {
+    gameState = 'gameover';
+    if (score > highScore) highScore = score;
+  }
+}
+
+function levelClear() {
+  // Bonus: time bonus + crystal bonus
+  const crystalBonus = collectedCrystals * 50;
+  const timeBonus    = Math.max(0, Math.floor((60 - levelTime) * 10));
+  score += crystalBonus + timeBonus;
+  spawnParticles(portal.x, portal.y, C.portal, 25, 1.2);
+  gameState = 'levelclear';
+  levelClearTimer = 120;
+}
+
+function handleScreenAdvance() {
+  if (gameState === 'title') {
+    initGame();
+    gameState = 'playing';
+  } else if (gameState === 'gameover') {
+    initGame();
+    gameState = 'playing';
+  } else if (gameState === 'levelclear') {
+    levelIndex++;
+    if (levelIndex >= levels.length) {
+      // All levels complete — game won!
+      gameState = 'gameover'; // reuse game-over screen with victory message
+      if (score > highScore) highScore = score;
+    } else {
+      loadLevel(levelIndex);
+      gameState = 'playing';
+    }
+  }
+}
+
+// ─── Drawing helpers ────────────────────────────────────────────────────────
+function drawPlatform(pl) {
+  const isMoving = pl.moving;
+  const color    = isMoving ? C.moving  : C.platform;
+  const edge     = isMoving ? C.movEdge : C.platEdge;
+  const top      = isMoving ? C.movTop  : C.platTop;
+
+  // Body
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.roundRect(pl.x, pl.y, pl.w, pl.h, 4);
+  ctx.fill();
+
+  // Edge glow
+  ctx.strokeStyle = edge;
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.roundRect(pl.x, pl.y, pl.w, pl.h, 4);
+  ctx.stroke();
+
+  // Top highlight strip
+  ctx.fillStyle = top;
+  ctx.beginPath();
+  ctx.roundRect(pl.x + 4, pl.y, pl.w - 8, 4, 2);
+  ctx.fill();
+
+  // Moving indicator dots
+  if (isMoving) {
+    ctx.fillStyle = '#9977ff';
+    for (let i = 0; i < 3; i++) {
+      ctx.beginPath();
+      ctx.arc(pl.x + pl.w/2 - 8 + i*8, pl.y + pl.h/2, 2, 0, Math.PI*2);
+      ctx.fill();
+    }
+  }
+}
+
+function drawSpike(s) {
+  const count = Math.floor(s.w / 14);
+  const tw    = s.w / count;
+  for (let i = 0; i < count; i++) {
+    const bx = s.x + i * tw;
+    ctx.fillStyle = C.spikeBase;
+    ctx.fillRect(bx, s.y + 8, tw - 1, 14);
+    ctx.fillStyle = C.spike;
+    ctx.beginPath();
+    ctx.moveTo(bx, s.y + 14);
+    ctx.lineTo(bx + tw/2, s.y);
+    ctx.lineTo(bx + tw - 1, s.y + 14);
+    ctx.closePath();
+    ctx.fill();
+    // glow
+    ctx.strokeStyle = '#ff8899';
+    ctx.lineWidth = 0.7;
+    ctx.stroke();
+  }
+}
+
+function drawCrystal(c) {
+  if (c.collected) return;
+  const idx = crystals.indexOf(c) % C.crystal.length;
+  const cy = c.y + Math.sin(c.wobble) * 4;
+
+  ctx.save();
+  ctx.translate(c.x, cy);
+
+  // Glow
+  const grd = ctx.createRadialGradient(0, 0, 0, 0, 0, 14);
+  grd.addColorStop(0, C.crystalGl[idx] + 'aa');
+  grd.addColorStop(1, C.crystal[idx] + '00');
+  ctx.fillStyle = grd;
+  ctx.beginPath();
+  ctx.arc(0, 0, 14, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Diamond shape
+  ctx.fillStyle = C.crystal[idx];
+  ctx.beginPath();
+  ctx.moveTo(0, -10);
+  ctx.lineTo(8, 0);
+  ctx.lineTo(0, 14);
+  ctx.lineTo(-8, 0);
+  ctx.closePath();
+  ctx.fill();
+
+  // Highlight
+  ctx.fillStyle = C.crystalGl[idx];
+  ctx.beginPath();
+  ctx.moveTo(-2, -8);
+  ctx.lineTo(4, -2);
+  ctx.lineTo(0, 4);
+  ctx.lineTo(-4, -2);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.restore();
+}
+
+function drawPortal(t) {
+  const px = portal.x, py = portal.y;
+  const pulse = Math.sin(portalPulse) * 0.3 + 1;
+
+  // Outer glow
+  const grd = ctx.createRadialGradient(px, py, 0, px, py, 36 * pulse);
+  grd.addColorStop(0, '#00ff88cc');
+  grd.addColorStop(0.5, '#00ff8844');
+  grd.addColorStop(1, '#00ff8800');
+  ctx.fillStyle = grd;
+  ctx.beginPath();
+  ctx.arc(px, py, 36 * pulse, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Ring
+  ctx.strokeStyle = C.portal;
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.ellipse(px, py, 16 * pulse, 22 * pulse, 0, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // Inner
+  ctx.strokeStyle = '#ffffff88';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.ellipse(px, py, 9 * pulse, 14 * pulse, 0, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // Star icon
+  ctx.fillStyle = C.portal;
+  ctx.font = 'bold 18px Courier New';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('✦', px, py);
+
+  // Label
+  ctx.fillStyle = '#00ff88cc';
+  ctx.font = 'bold 11px Courier New';
+  ctx.fillText('PORTAL', px, py - 30);
+}
+
+function drawPlayer() {
+  const p = player;
+  const cx = p.x + p.w / 2;
+  const cy = p.y + p.h / 2;
+
+  // Trail
+  for (let i = 0; i < p.trail.length; i++) {
+    const t = p.trail[i];
+    ctx.save();
+    ctx.globalAlpha = Math.max(0, t.alpha * 0.4);
+    ctx.fillStyle = C.player;
+    ctx.beginPath();
+    ctx.arc(t.x, t.y, 5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // Invincibility flash
+  if (p.invincible > 0 && Math.floor(p.invincible / 6) % 2 === 0) return;
+
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.scale(p.facing, 1);
+
+  // Shadow
+  ctx.fillStyle = C.playerSh + '55';
+  ctx.beginPath();
+  ctx.ellipse(0, p.h/2 + 2, 10, 4, 0, 0, Math.PI*2);
+  ctx.fill();
+
+  // Body glow
+  const bodyGrad = ctx.createRadialGradient(0, 0, 0, 0, 0, 18);
+  bodyGrad.addColorStop(0, '#00eeffaa');
+  bodyGrad.addColorStop(1, '#00eeff00');
+  ctx.fillStyle = bodyGrad;
+  ctx.beginPath();
+  ctx.arc(0, 0, 18, 0, Math.PI*2);
+  ctx.fill();
+
+  // Body
+  ctx.fillStyle = C.player;
+  ctx.beginPath();
+  ctx.roundRect(-p.w/2, -p.h/2, p.w, p.h, 6);
+  ctx.fill();
+
+  // Visor
+  ctx.fillStyle = '#001a22';
+  ctx.beginPath();
+  ctx.roundRect(-7, -p.h/2 + 4, 14, 10, 3);
+  ctx.fill();
+
+  // Eye glow
+  ctx.fillStyle = '#00eeff';
+  ctx.beginPath();
+  ctx.arc(-3, -p.h/2 + 9, 2.5, 0, Math.PI*2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(4, -p.h/2 + 9, 2.5, 0, Math.PI*2);
+  ctx.fill();
+
+  // Antenna
+  ctx.strokeStyle = C.player;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(0, -p.h/2);
+  ctx.lineTo(0, -p.h/2 - 8);
+  ctx.stroke();
+  ctx.fillStyle = '#ff4ef7';
+  ctx.beginPath();
+  ctx.arc(0, -p.h/2 - 9, 3, 0, Math.PI*2);
+  ctx.fill();
+
+  // Legs animation
+  const legSwing = Math.sin(p.animFrame / 4 * Math.PI * 2) * 5;
+  ctx.fillStyle = '#0099bb';
+  // Left leg
+  ctx.beginPath();
+  ctx.roundRect(-8, p.h/2 - 4, 7, 10 + (p.onGround ? legSwing : 0), 3);
+  ctx.fill();
+  // Right leg
+  ctx.beginPath();
+  ctx.roundRect(1, p.h/2 - 4, 7, 10 - (p.onGround ? legSwing : 0), 3);
+  ctx.fill();
+
+  ctx.restore();
+}
+
+function drawHUD() {
+  // Score
+  ctx.fillStyle = C.scoreClr;
+  ctx.font = 'bold 16px Courier New';
+  ctx.textAlign = 'left';
+  ctx.fillText(`SCORE: ${score}`, 10, 22);
+
+  // Level
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#cc99ff';
+  ctx.fillText(`LEVEL ${levelIndex + 1} / ${levels.length}`, BASE_W / 2, 22);
+
+  // Lives
+  ctx.textAlign = 'right';
+  ctx.fillStyle = C.lives;
+  ctx.fillText(`LIVES: ${'♥'.repeat(lives)}${'♡'.repeat(Math.max(0, 3 - lives))}`, BASE_W - 10, 22);
+
+  // Crystals
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#ff9af9';
+  ctx.fillText(`✦ ${collectedCrystals}/${totalCrystals}`, 10, 42);
+
+  // Timer
+  ctx.textAlign = 'right';
+  ctx.fillStyle = levelTime > 50 ? '#ff4444' : '#aaaacc';
+  ctx.fillText(`TIME: ${Math.ceil(levelTime)}s`, BASE_W - 10, 42);
+
+  // Control reminder (small, top center)
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#555577';
+  ctx.font = '11px Courier New';
+  ctx.fillText('← → / WASD: Move  |  Space / ↑ / W: Jump', BASE_W / 2, BASE_H - 10);
+}
+
+// ─── Screen renders ────────────────────────────────────────────────────────
+function drawTitleScreen() {
+  drawBackground(0);
+
+  // Title glow
+  ctx.save();
+  ctx.shadowColor = '#00eeff';
+  ctx.shadowBlur  = 40;
+  ctx.fillStyle   = '#00eeff';
+  ctx.font        = 'bold 72px Courier New';
+  ctx.textAlign   = 'center';
+  ctx.fillText('CRYSTAL', BASE_W/2, BASE_H/2 - 80);
+  ctx.fillStyle = '#ff4ef7';
+  ctx.shadowColor = '#ff4ef7';
+  ctx.fillText('CLIMB', BASE_W/2, BASE_H/2 - 10);
+  ctx.restore();
+
+  // Tagline
+  ctx.fillStyle = '#9966cc';
+  ctx.font      = '18px Courier New';
+  ctx.textAlign = 'center';
+  ctx.fillText('Collect crystals. Reach the portal. Ascend!', BASE_W/2, BASE_H/2 + 40);
+
+  // Controls box
+  const bx = BASE_W/2 - 210, by = BASE_H/2 + 65, bw = 420, bh = 100;
+  ctx.fillStyle = '#1a003388';
+  ctx.beginPath();
+  ctx.roundRect(bx, by, bw, bh, 10);
+  ctx.fill();
+  ctx.strokeStyle = '#7b2fff';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  ctx.fillStyle = '#e0d0ff';
+  ctx.font      = 'bold 14px Courier New';
+  ctx.textAlign = 'center';
+  ctx.fillText('CONTROLS', BASE_W/2, by + 22);
+  ctx.font   = '13px Courier New';
+  ctx.fillStyle = '#aaaacc';
+  ctx.fillText('← → Arrow Keys / A D  →  Move Left / Right', BASE_W/2, by + 44);
+  ctx.fillText('Space / ↑ / W          →  Jump  (hold for higher)', BASE_W/2, by + 62);
+  ctx.fillText('Collect ✦ crystals, then touch the green portal!', BASE_W/2, by + 80);
+
+  // High score
+  if (highScore > 0) {
+    ctx.fillStyle = '#ffee00';
+    ctx.font      = 'bold 14px Courier New';
+    ctx.fillText(`HIGH SCORE: ${highScore}`, BASE_W/2, BASE_H/2 + 180);
+  }
+
+  // Blinking prompt
+  ctx.fillStyle = Math.sin(blink * 4) > 0 ? '#00eeff' : '#007799';
+  ctx.font      = 'bold 18px Courier New';
+  ctx.fillText('— PRESS ANY KEY TO START —', BASE_W/2, BASE_H/2 + 210);
+}
+
+function drawGameScreen(timestamp) {
+  drawBackground(timestamp);
+
+  // Draw platforms
+  for (const pl of platforms) drawPlatform(pl);
+
+  // Draw spikes
+  for (const s of spikes) drawSpike(s);
+
+  // Draw portal
+  drawPortal(timestamp);
+
+  // Draw crystals
+  for (const c of crystals) drawCrystal(c);
+
+  // Draw player
+  drawPlayer();
+
+  // Particles
+  drawParticles();
+
+  // HUD
+  drawHUD();
+
+  // Screen flash on hit
+  if (screenFlash > 0) {
+    ctx.save();
+    ctx.globalAlpha = screenFlash * 0.35;
+    ctx.fillStyle = '#ff0033';
+    ctx.fillRect(0, 0, BASE_W, BASE_H);
+    ctx.restore();
+  }
+}
+
+function drawLevelClearScreen() {
+  // Fade overlay
+  ctx.save();
+  ctx.fillStyle = '#00000088';
+  ctx.fillRect(0, 0, BASE_W, BASE_H);
+  ctx.restore();
+
+  // Panel
+  const pw = 420, ph = 200;
+  const px = (BASE_W - pw)/2, py = (BASE_H - ph)/2;
+  ctx.fillStyle = '#0d0030ee';
+  ctx.beginPath();
+  ctx.roundRect(px, py, pw, ph, 14);
+  ctx.fill();
+  ctx.strokeStyle = '#00ff88';
+  ctx.lineWidth = 2.5;
+  ctx.stroke();
+
+  ctx.textAlign = 'center';
+  ctx.save();
+  ctx.shadowColor = '#00ff88';
+  ctx.shadowBlur  = 20;
+  ctx.fillStyle   = '#00ff88';
+  ctx.font        = 'bold 36px Courier New';
+  ctx.fillText('LEVEL CLEAR!', BASE_W/2, py + 52);
+  ctx.restore();
+
+  ctx.fillStyle = '#e0d0ff';
+  ctx.font      = '15px Courier New';
+  ctx.fillText(`Score: ${score}`, BASE_W/2, py + 90);
+  ctx.fillText(`Crystals: ${collectedCrystals}/${totalCrystals}`, BASE_W/2, py + 114);
+
+  ctx.fillStyle = Math.sin(blink * 4) > 0 ? '#00eeff' : '#005566';
+  ctx.font      = 'bold 16px Courier New';
+  const nextLabel = levelIndex + 1 < levels.length ? 'Press any key for Level ' + (levelIndex + 2) : 'Press any key for FINAL level!';
+  ctx.fillText(nextLabel, BASE_W/2, py + 150);
+
+  drawParticles();
+}
+
+function drawGameOverScreen() {
+  drawBackground(0);
+
+  const allLevelsCleared = levelIndex >= levels.length;
+  const titleText  = allLevelsCleared ? '  YOU WIN!  ' : 'GAME  OVER';
+  const titleColor = allLevelsCleared ? '#ffee00' : '#ff3344';
+  const glowColor  = allLevelsCleared ? '#ffee00' : '#ff3344';
+
+  ctx.save();
+  ctx.shadowColor = glowColor;
+  ctx.shadowBlur  = 40;
+  ctx.fillStyle   = titleColor;
+  ctx.font        = 'bold 64px Courier New';
+  ctx.textAlign   = 'center';
+  ctx.fillText(titleText, BASE_W/2, BASE_H/2 - 80);
+  ctx.restore();
+
+  if (allLevelsCleared) {
+    ctx.fillStyle = '#aaffcc';
+    ctx.font = '20px Courier New';
+    ctx.textAlign = 'center';
+    ctx.fillText('Congratulations! All levels conquered!', BASE_W/2, BASE_H/2 - 30);
+  }
+
+  ctx.fillStyle = '#e0d0ff';
+  ctx.font      = '20px Courier New';
+  ctx.textAlign = 'center';
+  ctx.fillText(`Final Score: ${score}`, BASE_W/2, BASE_H/2 + 10);
+
+  if (score >= highScore) {
+    ctx.fillStyle = '#ffee00';
+    ctx.font      = 'bold 16px Courier New';
+    ctx.fillText('★  NEW HIGH SCORE!  ★', BASE_W/2, BASE_H/2 + 40);
+  } else {
+    ctx.fillStyle = '#9966cc';
+    ctx.font      = '16px Courier New';
+    ctx.fillText(`High Score: ${highScore}`, BASE_W/2, BASE_H/2 + 40);
+  }
+
+  ctx.fillStyle = Math.sin(blink * 4) > 0 ? '#00eeff' : '#003344';
+  ctx.font      = 'bold 18px Courier New';
+  ctx.fillText('— PRESS ANY KEY TO PLAY AGAIN —', BASE_W/2, BASE_H/2 + 100);
+
+  drawParticles();
+}
+
+// ─── Main draw ─────────────────────────────────────────────────────────────
+function draw(timestamp) {
+  ctx.clearRect(0, 0, BASE_W, BASE_H);
+
+  if (gameState === 'title') {
+    drawTitleScreen();
+  } else if (gameState === 'playing') {
+    drawGameScreen(timestamp);
+  } else if (gameState === 'levelclear') {
+    drawGameScreen(timestamp);
+    drawLevelClearScreen();
+  } else if (gameState === 'gameover') {
+    drawGameOverScreen();
+  }
+}
+
+// ─── Start ─────────────────────────────────────────────────────────────────
+requestAnimationFrame(function bootstrap(t) {
+  lastTime = t;
+  requestAnimationFrame(update);
+});
+</script>
+</body>
+</html>

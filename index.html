@@ -1,0 +1,501 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Daily Games — Nev's Arcade</title>
+  <style>
+    /* ── Reset & base ──────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:       #07000f;
+      --bg2:      #0e0020;
+      --surface:  #110028;
+      --border:   #2a0060;
+      --accent:   #00eeff;
+      --accent2:  #a855f7;
+      --text:     #e0d0ff;
+      --muted:    #7766aa;
+      --radius:   14px;
+
+      /* genre colours */
+      --c-breakout:   #00eeff;
+      --c-shooter:    #a855f7;
+      --c-catching:   #ffee00;
+      --c-dodge:      #ff7700;
+      --c-maze:       #00ff88;
+      --c-platformer: #ff4ef7;
+      --c-snake:      #66ff66;
+      --c-puzzle:     #ff9966;
+      --c-rhythm:     #ff66cc;
+      --c-runner:     #88aaff;
+      --c-default:    #aaaacc;
+    }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      min-height: 100vh;
+      overflow-x: hidden;
+    }
+
+    /* ── Starfield ─────────────────────────────────────────────────── */
+    #stars {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: 0;
+      overflow: hidden;
+    }
+    .star {
+      position: absolute;
+      border-radius: 50%;
+      background: #fff;
+      animation: twinkle var(--dur, 3s) ease-in-out infinite;
+      animation-delay: var(--delay, 0s);
+      opacity: var(--op, 0.6);
+    }
+    @keyframes twinkle {
+      0%, 100% { opacity: var(--op, 0.6); }
+      50%       { opacity: calc(var(--op, 0.6) * 0.2); }
+    }
+
+    /* ── Layout wrapper ────────────────────────────────────────────── */
+    .page {
+      position: relative;
+      z-index: 1;
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 0 24px 80px;
+    }
+
+    /* ── Header ────────────────────────────────────────────────────── */
+    header {
+      text-align: center;
+      padding: 64px 0 48px;
+    }
+    .logo-line {
+      font-size: 13px;
+      letter-spacing: 0.25em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 12px;
+    }
+    h1 {
+      font-size: clamp(2.4rem, 6vw, 4rem);
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      line-height: 1.1;
+      background: linear-gradient(135deg, var(--accent) 0%, var(--accent2) 60%, #ff4ef7 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      margin-bottom: 16px;
+    }
+    .subtitle {
+      color: var(--muted);
+      font-size: 1.05rem;
+      max-width: 480px;
+      margin: 0 auto;
+      line-height: 1.6;
+    }
+    .subtitle strong {
+      color: var(--accent);
+      font-weight: 600;
+    }
+
+    /* ── Divider ───────────────────────────────────────────────────── */
+    .divider {
+      height: 1px;
+      background: linear-gradient(90deg, transparent, var(--border), var(--accent2) 50%, var(--border), transparent);
+      margin: 0 auto 36px;
+      max-width: 600px;
+    }
+
+    /* ── Filter bar ────────────────────────────────────────────────── */
+    .filter-bar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      justify-content: center;
+      margin-bottom: 40px;
+    }
+    .filter-btn {
+      background: var(--surface);
+      border: 1.5px solid var(--border);
+      color: var(--muted);
+      padding: 6px 16px;
+      border-radius: 999px;
+      font-size: 13px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      cursor: pointer;
+      transition: all 0.18s ease;
+      user-select: none;
+    }
+    .filter-btn:hover {
+      border-color: var(--accent2);
+      color: var(--text);
+    }
+    .filter-btn.active {
+      background: var(--accent2);
+      border-color: var(--accent2);
+      color: #fff;
+      box-shadow: 0 0 14px var(--accent2);
+    }
+    .filter-btn[data-filter="all"].active {
+      background: var(--accent);
+      border-color: var(--accent);
+      box-shadow: 0 0 14px var(--accent);
+      color: #001a22;
+    }
+
+    /* ── Game grid ─────────────────────────────────────────────────── */
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(290px, 1fr));
+      gap: 24px;
+    }
+
+    /* ── Game card ─────────────────────────────────────────────────── */
+    .card {
+      background: var(--surface);
+      border: 1.5px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+      cursor: pointer;
+      text-decoration: none;
+      color: inherit;
+    }
+    .card:hover {
+      transform: translateY(-5px);
+      border-color: var(--card-color, var(--accent2));
+      box-shadow: 0 8px 32px color-mix(in srgb, var(--card-color, var(--accent2)) 30%, transparent);
+    }
+
+    /* Colour bar at top of card */
+    .card-bar {
+      height: 4px;
+      background: var(--card-color, var(--accent2));
+      box-shadow: 0 0 12px var(--card-color, var(--accent2));
+    }
+
+    .card-body {
+      padding: 22px 22px 18px;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .card-meta {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .genre-badge {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      padding: 3px 10px;
+      border-radius: 999px;
+      background: color-mix(in srgb, var(--card-color, var(--accent2)) 18%, transparent);
+      color: var(--card-color, var(--accent2));
+      border: 1px solid color-mix(in srgb, var(--card-color, var(--accent2)) 40%, transparent);
+    }
+
+    .card-date {
+      font-size: 12px;
+      color: var(--muted);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .card-title {
+      font-size: 1.3rem;
+      font-weight: 800;
+      letter-spacing: -0.01em;
+      color: #fff;
+      line-height: 1.2;
+    }
+
+    .card-desc {
+      font-size: 13.5px;
+      color: var(--muted);
+      line-height: 1.55;
+      flex: 1;
+    }
+
+    .card-footer {
+      padding: 0 22px 20px;
+    }
+
+    .play-btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      width: 100%;
+      padding: 10px 0;
+      border-radius: 8px;
+      background: color-mix(in srgb, var(--card-color, var(--accent2)) 15%, transparent);
+      border: 1.5px solid color-mix(in srgb, var(--card-color, var(--accent2)) 50%, transparent);
+      color: var(--card-color, var(--accent2));
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      transition: all 0.16s ease;
+      cursor: pointer;
+      text-decoration: none;
+    }
+    .play-btn:hover {
+      background: var(--card-color, var(--accent2));
+      color: #fff;
+      box-shadow: 0 0 16px color-mix(in srgb, var(--card-color, var(--accent2)) 60%, transparent);
+    }
+    .play-btn .arrow { font-size: 16px; }
+
+    /* ── Hidden state for filter ────────────────────────────────────── */
+    .card.hidden {
+      display: none;
+    }
+
+    /* ── Empty state ────────────────────────────────────────────────── */
+    .empty-msg {
+      display: none;
+      text-align: center;
+      color: var(--muted);
+      font-size: 15px;
+      padding: 60px 0;
+      grid-column: 1 / -1;
+    }
+    .empty-msg.visible { display: block; }
+
+    /* ── Footer ─────────────────────────────────────────────────────── */
+    footer {
+      text-align: center;
+      padding-top: 60px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    footer a { color: var(--accent2); text-decoration: none; }
+    footer a:hover { text-decoration: underline; }
+
+    /* ── Responsive ──────────────────────────────────────────────────── */
+    @media (max-width: 480px) {
+      header { padding: 40px 0 36px; }
+      .grid  { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- Starfield -->
+<div id="stars"></div>
+
+<div class="page">
+
+  <header>
+    <p class="logo-line">✦ Nev's Arcade ✦</p>
+    <h1>Daily Browser Games</h1>
+    <p class="subtitle">A new <strong>hand-crafted browser game</strong> every day — no installs, no sign-up. Just click and play.</p>
+  </header>
+
+  <div class="divider"></div>
+
+  <!-- Filter bar -->
+  <div class="filter-bar" id="filterBar">
+    <button class="filter-btn active" data-filter="all">All Games</button>
+    <!-- genre buttons injected by JS -->
+  </div>
+
+  <!-- Game grid -->
+  <div class="grid" id="grid">
+
+    <a class="card"
+       href="game-2026-04-09.html"
+       data-genre="Platformer"
+       style="--card-color: var(--c-platformer)">
+      <div class="card-bar"></div>
+      <div class="card-body">
+        <div class="card-meta">
+          <span class="genre-badge">Platformer</span>
+          <span class="card-date">Apr 9, 2026</span>
+        </div>
+        <div class="card-title">Crystal Climb</div>
+        <div class="card-desc">Jump between neon platforms, collect glowing crystals, and leap through the portal — before time runs out. Coyote-time jumps, moving platforms, and spikes across 5 escalating levels.</div>
+      </div>
+      <div class="card-footer">
+        <span class="play-btn"><span class="arrow">▶</span> Play Now</span>
+      </div>
+    </a>
+
+    <a class="card"
+       href="game-2026-04-08.html"
+       data-genre="Maze"
+       style="--card-color: var(--c-maze)">
+      <div class="card-bar"></div>
+      <div class="card-body">
+        <div class="card-meta">
+          <span class="genre-badge">Maze</span>
+          <span class="card-date">Apr 8, 2026</span>
+        </div>
+        <div class="card-title">Neon Labyrinth</div>
+        <div class="card-desc">Navigate a glowing maze in real time. Find the exit before the clock runs out — walls pulse with electric energy and the paths grow more tangled each level.</div>
+      </div>
+      <div class="card-footer">
+        <span class="play-btn"><span class="arrow">▶</span> Play Now</span>
+      </div>
+    </a>
+
+    <a class="card"
+       href="game-2026-04-07.html"
+       data-genre="Dodge"
+       style="--card-color: var(--c-dodge)">
+      <div class="card-bar"></div>
+      <div class="card-body">
+        <div class="card-meta">
+          <span class="genre-badge">Dodge</span>
+          <span class="card-date">Apr 7, 2026</span>
+        </div>
+        <div class="card-title">Void Drift</div>
+        <div class="card-desc">Weave through an ever-thickening storm of incoming hazards. How long can you survive the void? Speed ramps up relentlessly — pure reflex, no mercy.</div>
+      </div>
+      <div class="card-footer">
+        <span class="play-btn"><span class="arrow">▶</span> Play Now</span>
+      </div>
+    </a>
+
+    <a class="card"
+       href="game-2026-04-06.html"
+       data-genre="Catching"
+       style="--card-color: var(--c-catching)">
+      <div class="card-bar"></div>
+      <div class="card-body">
+        <div class="card-meta">
+          <span class="genre-badge">Catching</span>
+          <span class="card-date">Apr 6, 2026</span>
+        </div>
+        <div class="card-title">Starfall Harvest</div>
+        <div class="card-desc">Stars and gems rain from the sky — catch the good ones, dodge the duds. A cosy score-chasing game with escalating challenge and satisfying combo chains.</div>
+      </div>
+      <div class="card-footer">
+        <span class="play-btn"><span class="arrow">▶</span> Play Now</span>
+      </div>
+    </a>
+
+    <a class="card"
+       href="game-2026-04-05.html"
+       data-genre="Shooter"
+       style="--card-color: var(--c-shooter)">
+      <div class="card-bar"></div>
+      <div class="card-body">
+        <div class="card-meta">
+          <span class="genre-badge">Shooter</span>
+          <span class="card-date">Apr 5, 2026</span>
+        </div>
+        <div class="card-title">Nebula Drift</div>
+        <div class="card-desc">Pilot your ship through deep space, blasting waves of alien formations. Auto-fire keeps the action flowing while you dodge return fire and collect power-ups.</div>
+      </div>
+      <div class="card-footer">
+        <span class="play-btn"><span class="arrow">▶</span> Play Now</span>
+      </div>
+    </a>
+
+    <a class="card"
+       href="game-2026-04-04.html"
+       data-genre="Breakout"
+       style="--card-color: var(--c-breakout)">
+      <div class="card-bar"></div>
+      <div class="card-body">
+        <div class="card-meta">
+          <span class="genre-badge">Breakout</span>
+          <span class="card-date">Apr 4, 2026</span>
+        </div>
+        <div class="card-title">Prism Break</div>
+        <div class="card-desc">A neon-soaked twist on the classic brick-breaker. Smash prismatic blocks, collect power-ups, and clear every level with your trusty paddle before you run out of balls.</div>
+      </div>
+      <div class="card-footer">
+        <span class="play-btn"><span class="arrow">▶</span> Play Now</span>
+      </div>
+    </a>
+
+    <p class="empty-msg" id="emptyMsg">No games found for that genre yet — check back soon!</p>
+  </div>
+
+  <footer>
+    <p>Games generated daily · All playable in your browser · No installs needed</p>
+    <p style="margin-top:8px">Built with vanilla HTML5 Canvas &amp; JavaScript</p>
+  </footer>
+
+</div>
+
+<script>
+  // ── Starfield ───────────────────────────────────────────────────────
+  const starsEl = document.getElementById('stars');
+  for (let i = 0; i < 150; i++) {
+    const s = document.createElement('div');
+    s.className = 'star';
+    const size = Math.random() * 2 + 0.5;
+    s.style.cssText = `
+      width: ${size}px; height: ${size}px;
+      left: ${Math.random() * 100}%;
+      top:  ${Math.random() * 100}%;
+      --op:    ${(0.2 + Math.random() * 0.6).toFixed(2)};
+      --dur:   ${(2 + Math.random() * 4).toFixed(1)}s;
+      --delay: ${(Math.random() * 5).toFixed(1)}s;
+    `;
+    starsEl.appendChild(s);
+  }
+
+  // ── Genre filter ────────────────────────────────────────────────────
+  const cards     = Array.from(document.querySelectorAll('.card'));
+  const filterBar = document.getElementById('filterBar');
+  const emptyMsg  = document.getElementById('emptyMsg');
+
+  // Collect unique genres and inject buttons
+  const genres = [...new Set(cards.map(c => c.dataset.genre))];
+  genres.forEach(g => {
+    const btn = document.createElement('button');
+    btn.className = 'filter-btn';
+    btn.dataset.filter = g;
+    btn.textContent = g;
+    filterBar.appendChild(btn);
+  });
+
+  filterBar.addEventListener('click', e => {
+    const btn = e.target.closest('.filter-btn');
+    if (!btn) return;
+
+    document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+
+    const filter = btn.dataset.filter;
+    let visible = 0;
+    cards.forEach(card => {
+      const match = filter === 'all' || card.dataset.genre === filter;
+      card.classList.toggle('hidden', !match);
+      if (match) visible++;
+    });
+    emptyMsg.classList.toggle('visible', visible === 0);
+  });
+
+  // ── Make whole card clickable (not just the button) ─────────────────
+  // Cards are <a> tags so this is handled natively — but prevent the
+  // inner .play-btn from double-navigating
+  document.querySelectorAll('.play-btn').forEach(btn => {
+    btn.addEventListener('click', e => e.preventDefault());
+  });
+</script>
+</body>
+</html>

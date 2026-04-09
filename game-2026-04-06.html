@@ -1,0 +1,662 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Starfall Harvest</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #05010f;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      overflow: hidden;
+      font-family: 'Courier New', Courier, monospace;
+    }
+    canvas {
+      display: block;
+      image-rendering: pixelated;
+    }
+  </style>
+</head>
+<body>
+<canvas id="gameCanvas"></canvas>
+<script>
+// Genre: Catching/collecting | Date: 2026-04-06
+// ============================================================
+//  STARFALL HARVEST
+//  Catch glowing stars with your cosmic basket — dodge meteors!
+//  Controls: Left/Right Arrow keys or A/D to move basket
+//            Any key to start / restart
+// ============================================================
+
+/* ── roundRect polyfill for older browsers ── */
+if (!CanvasRenderingContext2D.prototype.roundRect) {
+  CanvasRenderingContext2D.prototype.roundRect = function(x, y, w, h, r) {
+    if (w < 2 * r) r = w / 2;
+    if (h < 2 * r) r = h / 2;
+    this.beginPath();
+    this.moveTo(x + r, y);
+    this.arcTo(x + w, y,     x + w, y + h, r);
+    this.arcTo(x + w, y + h, x,     y + h, r);
+    this.arcTo(x,     y + h, x,     y,     r);
+    this.arcTo(x,     y,     x + w, y,     r);
+    this.closePath();
+    return this;
+  };
+}
+
+/* ── Canvas / responsive sizing ── */
+const canvas = document.getElementById('gameCanvas');
+const ctx    = canvas.getContext('2d');
+
+const LOGICAL_W = 480;
+const LOGICAL_H = 640;
+
+let scale = 1;
+function resize() {
+  const sw = window.innerWidth  / LOGICAL_W;
+  const sh = window.innerHeight / LOGICAL_H;
+  scale = Math.min(sw, sh);
+  canvas.width  = LOGICAL_W;
+  canvas.height = LOGICAL_H;
+  canvas.style.width  = (LOGICAL_W * scale) + 'px';
+  canvas.style.height = (LOGICAL_H * scale) + 'px';
+}
+resize();
+window.addEventListener('resize', resize);
+
+/* ── Keyboard state — keys object for simultaneous key support ── */
+const keys = {};
+document.addEventListener('keydown', e => {
+  keys[e.code] = true;
+  // Prevent arrow keys from scrolling the page
+  if (['Space','ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.code)) {
+    e.preventDefault();
+  }
+  // Any key advances the menu screens (PRIMARY control)
+  if (state === 'TITLE' || state === 'GAMEOVER') {
+    startGame();
+  }
+});
+document.addEventListener('keyup', e => { keys[e.code] = false; });
+
+/* ── Mouse / touch — SECONDARY optional control ── */
+let mouseX = null;
+canvas.addEventListener('mousemove', e => {
+  const rect = canvas.getBoundingClientRect();
+  mouseX = (e.clientX - rect.left) / scale;
+});
+canvas.addEventListener('touchmove', e => {
+  const rect = canvas.getBoundingClientRect();
+  mouseX = (e.touches[0].clientX - rect.left) / scale;
+  e.preventDefault();
+}, { passive: false });
+canvas.addEventListener('click', () => {
+  if (state === 'TITLE' || state === 'GAMEOVER') startGame();
+});
+
+/* ── Game constants ── */
+const BASKET_W      = 72;
+const BASKET_H      = 22;
+const BASKET_SPEED  = 5;    // pixels per frame when key held
+const STAR_RADIUS   = 10;
+const METEOR_RADIUS = 14;
+const STAR_POINTS   = 10;   // base score per caught star
+
+const COLORS = {
+  bg1:       '#05010f',
+  bg2:       '#0d0530',
+  star:      '#ffe96e',
+  starGlow:  '#ffb800',
+  meteor:    '#ff6a3d',
+  metGlow:   '#ff3300',
+  basket:    '#22d4f5',
+  basketRim: '#00ffff',
+  hud:       '#b0eeff',
+  accent:    '#ff79c6',
+  text:      '#ffffff',
+};
+
+/* ── Game state variables ── */
+let state = 'TITLE'; // 'TITLE' | 'PLAYING' | 'GAMEOVER'
+
+let score, highScore, lives, level, combo, comboTimer;
+let basket;
+let fallers;      // falling objects: stars and meteors
+let particles;    // visual burst effects
+let bgStars;      // decorative background stars (static layout)
+let spawnTimer, spawnInterval;
+let blink;        // phase for blinking text
+let levelUpMsg;   // seconds remaining for level-up banner
+let frameCount;
+
+/* ── Generate background star field ── */
+function genBgStars() {
+  bgStars = [];
+  for (let i = 0; i < 130; i++) {
+    bgStars.push({
+      x:           Math.random() * LOGICAL_W,
+      y:           Math.random() * LOGICAL_H,
+      r:           0.5 + Math.random() * 1.6,
+      alpha:       0.3 + Math.random() * 0.7,
+      twinkle:     Math.random() * Math.PI * 2,
+      twinkleSpd:  0.02 + Math.random() * 0.04,
+    });
+  }
+}
+genBgStars();
+
+/* ── Start / reset a new game ── */
+function startGame() {
+  if (state === 'PLAYING') return; // ignore if already playing
+  score         = 0;
+  lives         = 3;
+  level         = 1;
+  combo         = 0;
+  comboTimer    = 0;
+  spawnInterval = 90;   // frames between spawns (decreases each level)
+  spawnTimer    = 0;
+  fallers       = [];
+  particles     = [];
+  levelUpMsg    = 0;
+  frameCount    = 0;
+  mouseX        = null;
+  basket = {
+    x: LOGICAL_W / 2 - BASKET_W / 2,
+    y: LOGICAL_H - 62,
+    w: BASKET_W,
+    h: BASKET_H,
+  };
+  state = 'PLAYING';
+}
+
+/* ── Spawn a particle burst at (x,y) ── */
+function spawnParticles(x, y, color, count) {
+  for (let i = 0; i < count; i++) {
+    const ang = Math.random() * Math.PI * 2;
+    const spd = 1 + Math.random() * 3.5;
+    particles.push({
+      x, y,
+      vx:    Math.cos(ang) * spd,
+      vy:    Math.sin(ang) * spd,
+      life:  1,
+      decay: 0.028 + Math.random() * 0.03,
+      r:     2 + Math.random() * 4,
+      color,
+    });
+  }
+}
+
+/* ── Spawn one falling object ── */
+function spawnFaller(forceStar) {
+  const x = STAR_RADIUS + Math.random() * (LOGICAL_W - STAR_RADIUS * 2);
+  // Meteor probability grows with level (capped at 45%)
+  const meteorChance = Math.min(0.12 + level * 0.05, 0.45);
+  const isMeteor     = !forceStar && (Math.random() < meteorChance);
+  const baseSpeed    = 1.8 + level * 0.4;
+  fallers.push({
+    x,
+    y:          -22,
+    vy:         baseSpeed + Math.random() * 1.5,
+    type:       isMeteor ? 'meteor' : 'star',
+    angle:      Math.random() * Math.PI * 2,
+    spin:       (Math.random() - 0.5) * 0.09,
+    pulsePhase: Math.random() * Math.PI * 2,
+  });
+}
+
+/* ──────────────────────────────────────────────
+   DRAWING FUNCTIONS
+────────────────────────────────────────────── */
+
+function drawBg() {
+  // Deep space gradient
+  const grad = ctx.createLinearGradient(0, 0, 0, LOGICAL_H);
+  grad.addColorStop(0,   '#05010f');
+  grad.addColorStop(0.5, '#0d0530');
+  grad.addColorStop(1,   '#180a42');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, LOGICAL_W, LOGICAL_H);
+
+  // Animate twinkle for background stars
+  for (const s of bgStars) {
+    s.twinkle += s.twinkleSpd;
+    const a = s.alpha * (0.6 + 0.4 * Math.sin(s.twinkle));
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(255,240,200,${a.toFixed(2)})`;
+    ctx.fill();
+  }
+}
+
+function drawBasket(b) {
+  const cx = b.x + b.w / 2;
+
+  // Soft glow beneath basket
+  const glowGrad = ctx.createRadialGradient(cx, b.y + b.h, 2, cx, b.y + b.h, 44);
+  glowGrad.addColorStop(0, 'rgba(34,212,245,0.22)');
+  glowGrad.addColorStop(1, 'rgba(34,212,245,0)');
+  ctx.fillStyle = glowGrad;
+  ctx.beginPath();
+  ctx.ellipse(cx, b.y + b.h, 44, 14, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Basket tray (glowing cyan)
+  ctx.save();
+  ctx.shadowBlur  = 16;
+  ctx.shadowColor = COLORS.basketRim;
+  ctx.strokeStyle = COLORS.basketRim;
+  ctx.lineWidth   = 2.5;
+
+  // Bottom solid bar
+  ctx.beginPath();
+  ctx.roundRect(b.x, b.y + b.h - 9, b.w, 9, 4);
+  ctx.fillStyle = 'rgba(34,212,245,0.30)';
+  ctx.fill();
+  ctx.stroke();
+
+  // Left side wall
+  ctx.beginPath();
+  ctx.moveTo(b.x + 7, b.y);
+  ctx.lineTo(b.x,     b.y + b.h);
+  ctx.stroke();
+
+  // Right side wall
+  ctx.beginPath();
+  ctx.moveTo(b.x + b.w - 7, b.y);
+  ctx.lineTo(b.x + b.w,     b.y + b.h);
+  ctx.stroke();
+
+  ctx.restore();
+}
+
+function drawStar(x, y, r, angle, pulse) {
+  // Pulse the outer radius
+  const outerR = r + 2.2 * Math.sin(pulse);
+  const innerR = outerR * 0.42;
+  const pts    = 5;
+
+  ctx.save();
+  ctx.shadowBlur  = 22;
+  ctx.shadowColor = COLORS.starGlow;
+  ctx.fillStyle   = COLORS.star;
+  ctx.beginPath();
+  for (let i = 0; i < pts * 2; i++) {
+    const rad = (i % 2 === 0) ? outerR : innerR;
+    const a   = angle + (i * Math.PI) / pts;
+    const px  = x + rad * Math.cos(a);
+    const py  = y + rad * Math.sin(a);
+    i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+  }
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawMeteor(x, y, r, angle) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(angle);
+
+  // Fiery tail (gradient streak behind)
+  const tailGrad = ctx.createLinearGradient(-r * 2.8, 0, r * 0.5, 0);
+  tailGrad.addColorStop(0, 'rgba(255,106,61,0)');
+  tailGrad.addColorStop(1, 'rgba(255,106,61,0.65)');
+  ctx.fillStyle = tailGrad;
+  ctx.beginPath();
+  ctx.ellipse(-r * 0.8, 0, r * 2.2, r * 0.5, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Main rock body
+  ctx.shadowBlur  = 16;
+  ctx.shadowColor = COLORS.metGlow;
+  ctx.fillStyle   = COLORS.meteor;
+  ctx.beginPath();
+  ctx.arc(0, 0, r, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Crater detail
+  ctx.fillStyle = 'rgba(0,0,0,0.32)';
+  ctx.beginPath();
+  ctx.arc(r * 0.28, -r * 0.28, r * 0.30, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.restore();
+}
+
+function drawParticles() {
+  for (const p of particles) {
+    ctx.globalAlpha = Math.max(0, p.life);
+    ctx.fillStyle   = p.color;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.r * p.life, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawHUD() {
+  ctx.font = 'bold 15px Courier New';
+
+  // Score (top-left)
+  ctx.fillStyle = COLORS.hud;
+  ctx.textAlign = 'left';
+  ctx.fillText(`SCORE: ${score}`, 12, 24);
+
+  // High score (top-center)
+  ctx.fillStyle = COLORS.accent;
+  ctx.textAlign = 'center';
+  ctx.fillText(`BEST: ${highScore}`, LOGICAL_W / 2, 24);
+
+  // Level (top-right)
+  ctx.fillStyle = COLORS.hud;
+  ctx.textAlign = 'right';
+  ctx.fillText(`LVL ${level}`, LOGICAL_W - 12, 24);
+
+  // Lives as hearts (below score)
+  for (let i = 0; i < 3; i++) {
+    ctx.font      = '18px serif';
+    ctx.fillStyle = i < lives ? '#ff79c6' : 'rgba(255,121,198,0.2)';
+    ctx.textAlign = 'left';
+    ctx.fillText('♥', 12 + i * 24, 48);
+  }
+  ctx.font = 'bold 15px Courier New';
+
+  // Combo multiplier display
+  if (combo >= 2) {
+    ctx.fillStyle = COLORS.starGlow;
+    ctx.textAlign = 'right';
+    ctx.fillText(`×${combo} COMBO!`, LOGICAL_W - 12, 48);
+  }
+
+  // Subtle controls reminder at bottom
+  ctx.fillStyle = 'rgba(176,238,255,0.40)';
+  ctx.font      = '11px Courier New';
+  ctx.textAlign = 'center';
+  ctx.fillText('← → / A D  to move  |  catch ✦ stars  |  dodge ☄ meteors', LOGICAL_W / 2, LOGICAL_H - 10);
+
+  // Level-up banner (fades out)
+  if (levelUpMsg > 0) {
+    const alpha = Math.min(1, levelUpMsg / 0.6);
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle   = COLORS.accent;
+    ctx.font        = 'bold 32px Courier New';
+    ctx.textAlign   = 'center';
+    ctx.shadowBlur  = 24;
+    ctx.shadowColor = COLORS.accent;
+    ctx.fillText(`✦ LEVEL ${level}! ✦`, LOGICAL_W / 2, LOGICAL_H / 2 - 20);
+    ctx.restore();
+  }
+
+  // Reset alignment
+  ctx.textAlign = 'left';
+  ctx.font      = 'bold 15px Courier New';
+}
+
+function drawTitleScreen() {
+  drawBg();
+  ctx.save();
+  ctx.textAlign = 'center';
+
+  // Game title with glow
+  ctx.shadowBlur  = 45;
+  ctx.shadowColor = COLORS.starGlow;
+  ctx.fillStyle   = COLORS.star;
+  ctx.font        = 'bold 50px Courier New';
+  ctx.fillText('✦ STARFALL', LOGICAL_W / 2, 175);
+  ctx.fillText('HARVEST ✦', LOGICAL_W / 2, 232);
+  ctx.shadowBlur = 0;
+
+  // Tagline
+  ctx.fillStyle = COLORS.hud;
+  ctx.font      = '15px Courier New';
+  ctx.fillText('Catch stars. Dodge meteors. Survive!', LOGICAL_W / 2, 278);
+
+  // Controls info box
+  ctx.fillStyle   = 'rgba(34,212,245,0.07)';
+  ctx.strokeStyle = 'rgba(34,212,245,0.38)';
+  ctx.lineWidth   = 1.5;
+  ctx.beginPath();
+  ctx.roundRect(LOGICAL_W / 2 - 162, 302, 324, 136, 10);
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.fillStyle = COLORS.basketRim;
+  ctx.font      = 'bold 14px Courier New';
+  ctx.fillText('── CONTROLS ──', LOGICAL_W / 2, 328);
+
+  ctx.fillStyle = COLORS.text;
+  ctx.font      = '13px Courier New';
+  ctx.fillText('← → Arrow keys  or  A / D         Move', LOGICAL_W / 2, 352);
+  ctx.fillText('Catch  ✦ stars                   +10 pts', LOGICAL_W / 2, 372);
+  ctx.fillText('Combo chain               bonus points!', LOGICAL_W / 2, 392);
+  ctx.fillText('Dodge  ☄ meteors      (costs 1 life)', LOGICAL_W / 2, 412);
+  ctx.fillText('Miss a star                costs 1 life', LOGICAL_W / 2, 432);
+
+  // High score (if set)
+  if (highScore > 0) {
+    ctx.fillStyle = COLORS.accent;
+    ctx.font      = 'bold 15px Courier New';
+    ctx.fillText(`HIGH SCORE: ${highScore}`, LOGICAL_W / 2, 460);
+  }
+
+  // Blinking start prompt
+  blink += 0.04;
+  if (Math.sin(blink) > 0) {
+    ctx.fillStyle = COLORS.text;
+    ctx.font      = '17px Courier New';
+    ctx.fillText('Press any key to start', LOGICAL_W / 2, 510);
+  }
+
+  ctx.restore();
+}
+
+function drawGameOverScreen() {
+  drawBg();
+  ctx.save();
+  ctx.textAlign = 'center';
+
+  // Game Over heading
+  ctx.shadowBlur  = 34;
+  ctx.shadowColor = COLORS.accent;
+  ctx.fillStyle   = COLORS.accent;
+  ctx.font        = 'bold 48px Courier New';
+  ctx.fillText('GAME OVER', LOGICAL_W / 2, 200);
+  ctx.shadowBlur = 0;
+
+  // Final score
+  ctx.fillStyle = COLORS.star;
+  ctx.font      = 'bold 26px Courier New';
+  ctx.fillText(`Score: ${score}`, LOGICAL_W / 2, 262);
+
+  // Level reached
+  ctx.fillStyle = COLORS.hud;
+  ctx.font      = '18px Courier New';
+  ctx.fillText(`Level reached: ${level}`, LOGICAL_W / 2, 300);
+
+  // High score comparison
+  if (score >= highScore) {
+    ctx.shadowBlur  = 22;
+    ctx.shadowColor = COLORS.starGlow;
+    ctx.fillStyle   = COLORS.starGlow;
+    ctx.font        = 'bold 21px Courier New';
+    ctx.fillText('★  NEW HIGH SCORE!  ★', LOGICAL_W / 2, 340);
+    ctx.shadowBlur = 0;
+  } else {
+    ctx.fillStyle = COLORS.accent;
+    ctx.font      = '16px Courier New';
+    ctx.fillText(`High Score: ${highScore}`, LOGICAL_W / 2, 340);
+  }
+
+  // Blinking restart prompt (KEYBOARD primary)
+  blink += 0.04;
+  if (Math.sin(blink) > 0) {
+    ctx.fillStyle = COLORS.text;
+    ctx.font      = '16px Courier New';
+    ctx.fillText('Press any key  or  click PLAY AGAIN', LOGICAL_W / 2, 408);
+  }
+
+  // Play Again button (mouse/touch secondary)
+  ctx.fillStyle   = 'rgba(34,212,245,0.14)';
+  ctx.strokeStyle = COLORS.basketRim;
+  ctx.lineWidth   = 2;
+  ctx.beginPath();
+  ctx.roundRect(LOGICAL_W / 2 - 94, 428, 188, 46, 8);
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = COLORS.basketRim;
+  ctx.font      = 'bold 17px Courier New';
+  ctx.fillText('▶  PLAY AGAIN', LOGICAL_W / 2, 457);
+
+  ctx.restore();
+}
+
+/* ──────────────────────────────────────────────
+   GAME UPDATE (called every frame while playing)
+────────────────────────────────────────────── */
+function update() {
+  if (state !== 'PLAYING') return;
+  frameCount++;
+
+  // ── Move basket via keyboard (PRIMARY) ──
+  const goLeft  = keys['ArrowLeft']  || keys['KeyA'];
+  const goRight = keys['ArrowRight'] || keys['KeyD'];
+
+  if (goLeft)  basket.x -= BASKET_SPEED;
+  if (goRight) basket.x += BASKET_SPEED;
+
+  // Mouse / touch secondary steering (only when no key is held)
+  if (!goLeft && !goRight && mouseX !== null) {
+    const target = mouseX - basket.w / 2;
+    const dx     = target - basket.x;
+    basket.x    += Math.sign(dx) * Math.min(Math.abs(dx), BASKET_SPEED);
+  }
+
+  // Keep basket within canvas bounds
+  basket.x = Math.max(0, Math.min(LOGICAL_W - basket.w, basket.x));
+
+  // ── Spawn falling objects ──
+  spawnTimer++;
+  if (spawnTimer >= spawnInterval) {
+    spawnTimer = 0;
+    spawnFaller();
+    // Occasionally spawn a bonus second star in higher levels
+    if (level >= 3 && Math.random() < 0.28) spawnFaller(true);
+  }
+
+  // ── Level advancement (every 150 points) ──
+  const targetLevel = 1 + Math.floor(score / 150);
+  if (targetLevel > level) {
+    level         = targetLevel;
+    spawnInterval = Math.max(28, 90 - level * 8); // faster spawns each level
+    levelUpMsg    = 2.2; // seconds for banner
+  }
+  if (levelUpMsg > 0) levelUpMsg -= 1 / 60;
+
+  // ── Combo timeout ──
+  if (combo > 0) {
+    comboTimer--;
+    if (comboTimer <= 0) combo = 0;
+  }
+
+  // ── Update each faller ──
+  for (let i = fallers.length - 1; i >= 0; i--) {
+    const f = fallers[i];
+    f.y          += f.vy;
+    f.angle      += f.spin;
+    f.pulsePhase += 0.13;
+
+    // Collision: did the faller hit the basket?
+    const hitRadius = f.type === 'star' ? STAR_RADIUS : METEOR_RADIUS;
+    const withinX   = f.x > basket.x && f.x < basket.x + basket.w;
+    const hitY      = f.y + hitRadius >= basket.y && f.y - hitRadius < basket.y + basket.h;
+
+    if (withinX && hitY) {
+      if (f.type === 'star') {
+        // Caught a star!
+        combo++;
+        comboTimer  = 110; // ~1.8 seconds to chain next catch
+        const bonus = 10 * Math.max(1, combo - 1);
+        score      += bonus;
+        spawnParticles(f.x, f.y, COLORS.star, 12);
+      } else {
+        // Hit a meteor — lose a life
+        lives--;
+        combo = 0;
+        spawnParticles(f.x, f.y, COLORS.meteor, 18);
+        if (lives <= 0) {
+          highScore = Math.max(highScore, score);
+          state     = 'GAMEOVER';
+          blink     = 0;
+        }
+      }
+      fallers.splice(i, 1);
+      continue;
+    }
+
+    // Star fell off the bottom without being caught
+    if (f.y > LOGICAL_H + 30) {
+      if (f.type === 'star') {
+        lives--;
+        combo = 0;
+        if (lives <= 0) {
+          highScore = Math.max(highScore, score);
+          state     = 'GAMEOVER';
+          blink     = 0;
+        }
+      }
+      fallers.splice(i, 1);
+    }
+  }
+
+  // ── Update particles ──
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x    += p.vx;
+    p.y    += p.vy;
+    p.vy   += 0.1; // light gravity
+    p.life -= p.decay;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+}
+
+/* ──────────────────────────────────────────────
+   MAIN GAME LOOP
+────────────────────────────────────────────── */
+highScore = 0; // persists across rounds in this session
+
+function gameLoop() {
+  update();
+
+  // Dispatch to correct draw routine
+  if (state === 'TITLE') {
+    drawTitleScreen();
+  } else if (state === 'GAMEOVER') {
+    drawGameOverScreen();
+  } else {
+    // Playing screen
+    drawBg();
+    for (const f of fallers) {
+      if (f.type === 'star') {
+        drawStar(f.x, f.y, STAR_RADIUS, f.angle, f.pulsePhase);
+      } else {
+        drawMeteor(f.x, f.y, METEOR_RADIUS, f.angle);
+      }
+    }
+    drawBasket(basket);
+    drawParticles();
+    drawHUD();
+  }
+
+  requestAnimationFrame(gameLoop);
+}
+
+// Kick off the loop
+requestAnimationFrame(gameLoop);
+</script>
+</body>
+</html>

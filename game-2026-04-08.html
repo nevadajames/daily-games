@@ -1,0 +1,614 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NEON LABYRINTH</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #000;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      overflow: hidden;
+      font-family: 'Courier New', monospace;
+    }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+<canvas id="gameCanvas"></canvas>
+<script>
+// Genre: Maze | Date: 2026-04-08
+// NEON LABYRINTH — Navigate glowing corridors, collect gems, reach the exit!
+
+// ─── Canvas Setup ────────────────────────────────────────────────────────────
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+
+const BASE_W = 800;
+const BASE_H = 600;
+let scale = 1;
+
+function resizeCanvas() {
+  scale = Math.min(window.innerWidth / BASE_W, window.innerHeight / BASE_H);
+  canvas.width  = Math.floor(BASE_W * scale);
+  canvas.height = Math.floor(BASE_H * scale);
+  canvas.style.width  = canvas.width  + 'px';
+  canvas.style.height = canvas.height + 'px';
+}
+resizeCanvas();
+window.addEventListener('resize', resizeCanvas);
+
+// ─── roundRect Polyfill ──────────────────────────────────────────────────────
+if (!CanvasRenderingContext2D.prototype.roundRect) {
+  CanvasRenderingContext2D.prototype.roundRect = function(x, y, w, h, r) {
+    r = Math.min(r, w / 2, h / 2);
+    this.beginPath();
+    this.moveTo(x + r, y);
+    this.lineTo(x + w - r, y);
+    this.arcTo(x + w, y,     x + w, y + r,     r);
+    this.lineTo(x + w, y + h - r);
+    this.arcTo(x + w, y + h, x + w - r, y + h, r);
+    this.lineTo(x + r, y + h);
+    this.arcTo(x,     y + h, x,     y + h - r, r);
+    this.lineTo(x, y + r);
+    this.arcTo(x,     y,     x + r, y,         r);
+    this.closePath();
+    return this;
+  };
+}
+
+// ─── Colour Palette ───────────────────────────────────────────────────────────
+const C = {
+  bg:          '#050010',
+  floor:       '#0a0022',
+  wall:        '#6600ff',
+  player:      '#00ffff',
+  playerCore:  '#ffffff',
+  playerGlow:  '#00aaff',
+  gem:         '#ff00ff',
+  gemGlow:     '#ff66ff',
+  exit:        '#00ff88',
+  exitLocked:  '#224455',
+  hud:         '#00ffff',
+  hudGlow:     '#6600ff',
+  timerGood:   '#00ff88',
+  timerWarn:   '#ffaa00',
+  timerDanger: '#ff2244',
+  textDim:     '#8888aa',
+  gold:        '#ffaa00',
+};
+
+// ─── Input System ─────────────────────────────────────────────────────────────
+const keys = {};
+window.addEventListener('keydown', e => {
+  const wasDown = keys[e.code];
+  keys[e.code] = true;
+  if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space'].includes(e.code)) {
+    e.preventDefault();
+  }
+  if (!wasDown) {
+    if (gs === 'title')                        startGame();
+    if (gs === 'gameover' || gs === 'levelwin') resetToTitle();
+  }
+});
+window.addEventListener('keyup', e => { keys[e.code] = false; });
+
+canvas.addEventListener('click', () => {
+  if (gs === 'title')                        startGame();
+  else if (gs === 'gameover' || gs === 'levelwin') resetToTitle();
+});
+
+// ─── Maze Generation: Recursive Backtracker (DFS) ────────────────────────────
+// Each cell bitmask: bit0=N open, bit1=E open, bit2=S open, bit3=W open
+const DIR_N = 0, DIR_E = 1, DIR_S = 2, DIR_W = 3;
+const DIRS = [
+  { bit: 1, dx:  0, dy: -1, opp: 2 },  // N
+  { bit: 2, dx:  1, dy:  0, opp: 3 },  // E
+  { bit: 4, dx:  0, dy:  1, opp: 0 },  // S
+  { bit: 8, dx: -1, dy:  0, opp: 1 },  // W
+];
+
+function makeMaze(cols, rows) {
+  const cells   = new Uint8Array(cols * rows);
+  const visited = new Uint8Array(cols * rows);
+  function idx(x, y) { return y * cols + x; }
+  // Use iterative DFS to avoid stack overflow on large mazes
+  const stack = [{ x: 0, y: 0 }];
+  visited[0] = 1;
+  while (stack.length > 0) {
+    const cur = stack[stack.length - 1];
+    const order = [0,1,2,3].sort(() => Math.random() - 0.5);
+    let moved = false;
+    for (const d of order) {
+      const nx = cur.x + DIRS[d].dx;
+      const ny = cur.y + DIRS[d].dy;
+      if (nx >= 0 && nx < cols && ny >= 0 && ny < rows && !visited[idx(nx, ny)]) {
+        cells[idx(cur.x, cur.y)] |= DIRS[d].bit;
+        cells[idx(nx, ny)]       |= DIRS[DIRS[d].opp].bit;
+        visited[idx(nx, ny)] = 1;
+        stack.push({ x: nx, y: ny });
+        moved = true;
+        break;
+      }
+    }
+    if (!moved) stack.pop();
+  }
+  return cells;
+}
+
+// ─── Game State ───────────────────────────────────────────────────────────────
+let gs         = 'title'; // 'title' | 'playing' | 'gameover' | 'levelwin'
+let level      = 1;
+let score      = 0;
+let highScore  = 0;
+let timeLeft   = 0;
+let maxTime    = 0;
+let animFrame  = 0;
+let lastTS     = 0;
+
+let maze, mazeCols, mazeRows, cellSize, mazeOffX, mazeOffY;
+let player;       // { x, y }
+let gems;         // [{ x, y, collected }]
+let exitCell;     // { x, y }
+let exitUnlocked;
+
+// Key-repeat movement
+const MOVE_INITIAL = 180;
+const MOVE_REPEAT  = 90;
+let moveTimer = 0;
+let heldDir   = -1;
+
+// ─── Level Initialisation ─────────────────────────────────────────────────────
+function setupLevel() {
+  mazeCols = 9  + Math.min(level - 1, 8) * 2;   // 9→25
+  mazeRows = 7  + Math.min(level - 1, 6) * 2;   // 7→19
+
+  const HUD_H = 58, PAD = 16;
+  cellSize = Math.max(18, Math.floor(
+    Math.min((BASE_W - PAD*2) / mazeCols, (BASE_H - HUD_H - PAD*2) / mazeRows)
+  ));
+
+  const mazeW = mazeCols * cellSize;
+  const mazeH = mazeRows * cellSize;
+  mazeOffX = Math.floor((BASE_W - mazeW) / 2);
+  mazeOffY = HUD_H + Math.floor((BASE_H - HUD_H - mazeH) / 2);
+
+  maze = makeMaze(mazeCols, mazeRows);
+
+  player       = { x: 0, y: 0 };
+  exitCell     = { x: mazeCols - 1, y: mazeRows - 1 };
+  exitUnlocked = false;
+
+  const gemCount = 3 + level * 2;
+  gems = [];
+  const used = new Set(['0,0', `${exitCell.x},${exitCell.y}`]);
+  while (gems.length < gemCount) {
+    const gx = Math.floor(Math.random() * mazeCols);
+    const gy = Math.floor(Math.random() * mazeRows);
+    const k  = `${gx},${gy}`;
+    if (!used.has(k)) {
+      used.add(k);
+      gems.push({ x: gx, y: gy, collected: false });
+    }
+  }
+
+  maxTime  = Math.max(25000, 70000 - (level - 1) * 6000);
+  timeLeft = maxTime;
+  heldDir  = -1;
+  moveTimer = 0;
+}
+
+// ─── Game Control ─────────────────────────────────────────────────────────────
+function startGame() {
+  level = 1; score = 0;
+  gs = 'playing';
+  setupLevel();
+}
+
+function resetToTitle() { gs = 'title'; }
+
+function tryMove(d) {
+  const i = player.y * mazeCols + player.x;
+  if (maze[i] & DIRS[d].bit) {
+    player.x += DIRS[d].dx;
+    player.y += DIRS[d].dy;
+    pickUpGems();
+    checkExit();
+    return true;
+  }
+  return false;
+}
+
+function pickUpGems() {
+  for (const g of gems) {
+    if (!g.collected && g.x === player.x && g.y === player.y) {
+      g.collected = true;
+      score += 100 * level;
+    }
+  }
+  if (!exitUnlocked && gems.every(g => g.collected)) {
+    exitUnlocked = true;
+  }
+}
+
+function checkExit() {
+  if (exitUnlocked && player.x === exitCell.x && player.y === exitCell.y) {
+    score += Math.floor(timeLeft / 100) * level * 5;
+    gs = 'levelwin';
+    setTimeout(() => {
+      level++;
+      gs = 'playing';
+      setupLevel();
+    }, 1600);
+  }
+}
+
+function getHeldDir() {
+  if (keys['ArrowUp']    || keys['KeyW']) return DIR_N;
+  if (keys['ArrowRight'] || keys['KeyD']) return DIR_E;
+  if (keys['ArrowDown']  || keys['KeyS']) return DIR_S;
+  if (keys['ArrowLeft']  || keys['KeyA']) return DIR_W;
+  return -1;
+}
+
+// ─── Drawing Utilities ────────────────────────────────────────────────────────
+function S(v) { return v * scale; }
+
+function glowText(text, x, y, color, glowColor, size, align) {
+  align = align || 'center';
+  ctx.save();
+  ctx.font        = `bold ${S(size)}px 'Courier New', monospace`;
+  ctx.textAlign   = align;
+  ctx.shadowColor = glowColor;
+  ctx.shadowBlur  = S(16);
+  ctx.fillStyle   = color;
+  ctx.fillText(text, S(x), S(y));
+  ctx.shadowBlur  = 0;
+  ctx.restore();
+}
+
+// ─── Render: Maze ─────────────────────────────────────────────────────────────
+function drawMaze() {
+  const cs = cellSize;
+  const wW = Math.max(1.5, cs * 0.08);
+
+  // Floor tiles
+  for (let y = 0; y < mazeRows; y++) {
+    for (let x = 0; x < mazeCols; x++) {
+      ctx.fillStyle = C.floor;
+      ctx.fillRect(S(mazeOffX + x*cs), S(mazeOffY + y*cs), S(cs), S(cs));
+    }
+  }
+
+  // Neon walls
+  ctx.strokeStyle = C.wall;
+  ctx.lineWidth   = S(wW);
+  ctx.lineCap     = 'square';
+  ctx.shadowColor = C.wall;
+  ctx.shadowBlur  = S(5);
+
+  for (let y = 0; y < mazeRows; y++) {
+    for (let x = 0; x < mazeCols; x++) {
+      const cell = maze[y * mazeCols + x];
+      const px   = mazeOffX + x * cs;
+      const py   = mazeOffY + y * cs;
+      if (!(cell & 1)) { ctx.beginPath(); ctx.moveTo(S(px), S(py)); ctx.lineTo(S(px+cs), S(py)); ctx.stroke(); }
+      if (!(cell & 2)) { ctx.beginPath(); ctx.moveTo(S(px+cs), S(py)); ctx.lineTo(S(px+cs), S(py+cs)); ctx.stroke(); }
+      if (!(cell & 4)) { ctx.beginPath(); ctx.moveTo(S(px), S(py+cs)); ctx.lineTo(S(px+cs), S(py+cs)); ctx.stroke(); }
+      if (!(cell & 8)) { ctx.beginPath(); ctx.moveTo(S(px), S(py)); ctx.lineTo(S(px), S(py+cs)); ctx.stroke(); }
+    }
+  }
+  ctx.shadowBlur = 0;
+}
+
+// ─── Render: Gems ─────────────────────────────────────────────────────────────
+function drawGems() {
+  const cs = cellSize;
+  const t  = animFrame * 0.05;
+  for (const g of gems) {
+    if (g.collected) continue;
+    const cx = mazeOffX + g.x * cs + cs / 2;
+    const cy = mazeOffY + g.y * cs + cs / 2;
+    const r  = cs * 0.22 + Math.sin(t + g.x * 1.3 + g.y * 0.9) * cs * 0.04;
+    ctx.save();
+    ctx.shadowColor = C.gemGlow;
+    ctx.shadowBlur  = S(14);
+    ctx.fillStyle   = C.gem;
+    ctx.beginPath();
+    ctx.moveTo(S(cx),           S(cy - r));
+    ctx.lineTo(S(cx + r * 0.7), S(cy));
+    ctx.lineTo(S(cx),           S(cy + r));
+    ctx.lineTo(S(cx - r * 0.7), S(cy));
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle  = 'rgba(255,255,255,0.5)';
+    ctx.shadowBlur = 0;
+    ctx.beginPath();
+    ctx.arc(S(cx - r*0.18), S(cy - r*0.35), S(r*0.18), 0, Math.PI*2);
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+// ─── Render: Exit Portal ──────────────────────────────────────────────────────
+function drawExit() {
+  const cs    = cellSize;
+  const cx    = mazeOffX + exitCell.x * cs + cs / 2;
+  const cy    = mazeOffY + exitCell.y * cs + cs / 2;
+  const r     = cs * 0.32;
+  const t     = animFrame * 0.06;
+  const pulse = exitUnlocked ? (1 + Math.sin(t) * 0.12) : 0.6;
+  const color = exitUnlocked ? C.exit : C.exitLocked;
+  const gColor = exitUnlocked ? C.exit : '#224466';
+
+  ctx.save();
+  ctx.shadowColor = gColor;
+  ctx.shadowBlur  = exitUnlocked ? S(20) : S(4);
+  ctx.fillStyle   = color;
+  ctx.beginPath();
+  ctx.arc(S(cx), S(cy), S(r * pulse), 0, Math.PI * 2);
+  ctx.fill();
+
+  if (exitUnlocked) {
+    // Spinning arcs
+    const spin = t * 2;
+    ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+    ctx.lineWidth   = S(1.5);
+    ctx.shadowBlur  = 0;
+    for (let k = 0; k < 6; k++) {
+      const a1 = spin + k * Math.PI / 3;
+      ctx.beginPath();
+      ctx.arc(S(cx), S(cy), S(r * 0.7), a1, a1 + Math.PI / 5);
+      ctx.stroke();
+    }
+    // Exit arrow
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth   = S(1.5);
+    ctx.shadowColor = C.exit;
+    ctx.shadowBlur  = S(8);
+    const al = r * 0.4;
+    ctx.beginPath();
+    ctx.moveTo(S(cx - al), S(cy));
+    ctx.lineTo(S(cx + al), S(cy));
+    ctx.moveTo(S(cx + al*0.5), S(cy - al*0.4));
+    ctx.lineTo(S(cx + al), S(cy));
+    ctx.lineTo(S(cx + al*0.5), S(cy + al*0.4));
+    ctx.stroke();
+  } else {
+    // Lock icon
+    ctx.shadowBlur  = 0;
+    ctx.strokeStyle = '#335566';
+    ctx.lineWidth   = S(1.5);
+    const lW = r * 0.5, lH = r * 0.45;
+    ctx.strokeRect(S(cx - lW/2), S(cy), S(lW), S(lH));
+    ctx.beginPath();
+    ctx.arc(S(cx), S(cy), S(lW/2), Math.PI, 0);
+    ctx.stroke();
+  }
+  ctx.shadowBlur = 0;
+  ctx.restore();
+
+  ctx.font      = `${S(7)}px 'Courier New'`;
+  ctx.fillStyle = exitUnlocked ? C.exit : '#336688';
+  ctx.textAlign = 'center';
+  ctx.fillText('EXIT', S(cx), S(mazeOffY + exitCell.y * cs + cs - 2));
+}
+
+// ─── Render: Player ──────────────────────────────────────────────────────────
+function drawPlayer() {
+  const cs = cellSize;
+  const cx = mazeOffX + player.x * cs + cs / 2;
+  const cy = mazeOffY + player.y * cs + cs / 2;
+  const r  = cs * 0.28;
+  const t  = animFrame * 0.09;
+
+  ctx.save();
+  ctx.shadowColor = C.playerGlow;
+  ctx.shadowBlur  = S(18);
+  const grd = ctx.createRadialGradient(S(cx), S(cy), 0, S(cx), S(cy), S(r));
+  grd.addColorStop(0,   C.playerCore);
+  grd.addColorStop(0.5, C.player);
+  grd.addColorStop(1,   C.playerGlow);
+  ctx.fillStyle = grd;
+  ctx.beginPath();
+  ctx.arc(S(cx), S(cy), S(r), 0, Math.PI * 2);
+  ctx.fill();
+
+  const ringR = r + 4 + Math.sin(t) * 2;
+  ctx.globalAlpha = 0.35 - Math.abs(Math.sin(t)) * 0.25;
+  ctx.strokeStyle = C.player;
+  ctx.lineWidth   = S(1.5);
+  ctx.shadowBlur  = 0;
+  ctx.beginPath();
+  ctx.arc(S(cx), S(cy), S(ringR), 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.restore();
+}
+
+// ─── Render: HUD ─────────────────────────────────────────────────────────────
+function drawHUD() {
+  ctx.fillStyle = 'rgba(5,0,16,0.95)';
+  ctx.fillRect(0, 0, S(BASE_W), S(56));
+  ctx.fillStyle = C.hudGlow;
+  ctx.fillRect(0, S(55), S(BASE_W), S(2));
+
+  glowText('SCORE: ' + score, 8, 20, C.hud, C.hudGlow, 12, 'left');
+  glowText('BEST: ' + highScore, 8, 36, '#9977ff', '#6600ff', 10, 'left');
+  glowText('LEVEL ' + level, BASE_W / 2, 30, C.hud, C.wall, 17, 'center');
+
+  const remGems  = gems.filter(g => !g.collected).length;
+  const gemLabel = remGems > 0 ? ('◆ x' + remGems + ' remaining') : '◆ ALL COLLECTED — find the exit!';
+  const gemColor = remGems > 0 ? C.gem : C.exit;
+  glowText(gemLabel, BASE_W / 2, 48, gemColor, gemColor, 10, 'center');
+
+  // Timer bar
+  const barW = 190, barH = 11, barX = BASE_W - barW - 10, barY = 21;
+  const ratio  = timeLeft / maxTime;
+  const tColor = ratio > 0.5 ? C.timerGood : ratio > 0.25 ? C.timerWarn : C.timerDanger;
+
+  ctx.fillStyle = '#1a0030';
+  ctx.beginPath();
+  ctx.roundRect(S(barX), S(barY), S(barW), S(barH), S(4));
+  ctx.fill();
+
+  if (ratio > 0) {
+    ctx.fillStyle   = tColor;
+    ctx.shadowColor = tColor;
+    ctx.shadowBlur  = S(6);
+    ctx.beginPath();
+    ctx.roundRect(S(barX), S(barY), S(barW * ratio), S(barH), S(4));
+    ctx.fill();
+    ctx.shadowBlur = 0;
+  }
+
+  glowText('TIME', barX - 4, barY + 9, C.textDim, C.hudGlow, 9, 'right');
+  glowText(Math.ceil(timeLeft / 1000) + 's', barX + barW + 7, barY + 9, tColor, tColor, 10, 'left');
+}
+
+// ─── Render: Title Screen ─────────────────────────────────────────────────────
+function drawTitle() {
+  ctx.fillStyle = C.bg;
+  ctx.fillRect(0, 0, S(BASE_W), S(BASE_H));
+
+  ctx.strokeStyle = 'rgba(102,0,255,0.08)';
+  ctx.lineWidth = S(1);
+  for (let x = 0; x <= BASE_W; x += 40) { ctx.beginPath(); ctx.moveTo(S(x), 0); ctx.lineTo(S(x), S(BASE_H)); ctx.stroke(); }
+  for (let y = 0; y <= BASE_H; y += 40) { ctx.beginPath(); ctx.moveTo(0, S(y)); ctx.lineTo(S(BASE_W), S(y)); ctx.stroke(); }
+
+  glowText('NEON',        BASE_W/2, 175, '#ff00ff', '#ff00ff', 60);
+  glowText('LABYRINTH',   BASE_W/2, 245, C.player,  C.player,  50);
+  glowText('Navigate · Collect · Escape', BASE_W/2, 285, C.textDim, C.wall, 13);
+
+  // Controls panel
+  ctx.save();
+  ctx.fillStyle   = 'rgba(20,0,50,0.85)';
+  ctx.strokeStyle = C.wall;
+  ctx.lineWidth   = S(1.5);
+  ctx.shadowColor = C.wall;
+  ctx.shadowBlur  = S(10);
+  ctx.beginPath();
+  ctx.roundRect(S(190), S(305), S(420), S(160), S(12));
+  ctx.fill();
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+  ctx.restore();
+
+  glowText('CONTROLS',                                BASE_W/2, 328, C.hud,     C.wall,    12);
+  glowText('Arrow Keys  or  WASD  —  Move',           BASE_W/2, 350, '#ccccee', C.wall,    11);
+  glowText('Collect ALL gems (◆) to unlock EXIT',     BASE_W/2, 373, C.gem,     C.gemGlow, 11);
+  glowText('Reach EXIT portal before time expires',   BASE_W/2, 395, C.exit,    C.exit,    11);
+  glowText('Higher levels = larger maze + less time', BASE_W/2, 416, C.textDim, C.hudGlow, 10);
+  glowText('Speed bonus points for fast clears',      BASE_W/2, 436, C.textDim, C.hudGlow, 10);
+
+  if (highScore > 0) {
+    glowText('HIGH SCORE: ' + highScore, BASE_W/2, 480, C.gold, '#ff8800', 15);
+  }
+
+  if (Math.floor(animFrame / 28) % 2 === 0) {
+    glowText('PRESS ANY KEY TO START', BASE_W/2, 548, C.hud, C.wall, 14);
+  }
+}
+
+// ─── Render: Level Win ────────────────────────────────────────────────────────
+function drawLevelWin() {
+  ctx.fillStyle = 'rgba(0,255,136,0.12)';
+  ctx.fillRect(0, 0, S(BASE_W), S(BASE_H));
+  glowText('LEVEL ' + level + ' COMPLETE!', BASE_W/2, BASE_H/2 - 20, C.exit, C.exit, 36);
+  glowText('Loading next level…',           BASE_W/2, BASE_H/2 + 30, C.hud,  C.wall, 18);
+}
+
+// ─── Render: Game Over ────────────────────────────────────────────────────────
+function drawGameOver() {
+  ctx.fillStyle = 'rgba(5,0,16,0.82)';
+  ctx.fillRect(0, 0, S(BASE_W), S(BASE_H));
+
+  glowText('GAME OVER',     BASE_W/2, 195, '#ff2244', '#ff0022', 50);
+  glowText("TIME'S UP!",    BASE_W/2, 248, '#ff6666', '#ff2244', 20);
+  glowText('SCORE: ' + score,         BASE_W/2, 308, C.hud,     C.wall,    24);
+  glowText('LEVEL REACHED: ' + level, BASE_W/2, 345, '#aaaacc', C.hudGlow, 16);
+
+  if (score > 0 && score >= highScore) {
+    glowText('★  NEW HIGH SCORE!  ★', BASE_W/2, 390, C.gold, '#ff6600', 18);
+  } else if (highScore > 0) {
+    glowText('HIGH SCORE: ' + highScore, BASE_W/2, 390, C.gold, '#ff6600', 14);
+  }
+
+  if (Math.floor(animFrame / 28) % 2 === 0) {
+    glowText('PRESS ANY KEY TO PLAY AGAIN', BASE_W/2, 470, C.hud, C.wall, 14);
+  }
+}
+
+// ─── Main Game Loop ───────────────────────────────────────────────────────────
+function gameLoop(ts) {
+  const dt = lastTS ? Math.min(ts - lastTS, 50) : 16;
+  lastTS = ts;
+  animFrame++;
+
+  ctx.fillStyle = C.bg;
+  ctx.fillRect(0, 0, S(BASE_W), S(BASE_H));
+
+  if (gs === 'title') {
+    drawTitle();
+
+  } else if (gs === 'playing') {
+    // Timer countdown
+    timeLeft -= dt;
+    if (timeLeft <= 0) {
+      timeLeft = 0;
+      if (score > highScore) highScore = score;
+      gs = 'gameover';
+    }
+
+    // Movement with key-repeat
+    const dir = getHeldDir();
+    if (dir !== -1) {
+      if (dir !== heldDir) {
+        tryMove(dir);
+        heldDir   = dir;
+        moveTimer = MOVE_INITIAL;
+      } else {
+        moveTimer -= dt;
+        if (moveTimer <= 0) {
+          tryMove(dir);
+          moveTimer = MOVE_REPEAT;
+        }
+      }
+    } else {
+      heldDir   = -1;
+      moveTimer = 0;
+    }
+
+    drawMaze();
+    drawGems();
+    drawExit();
+    drawPlayer();
+    drawHUD();
+
+  } else if (gs === 'levelwin') {
+    drawMaze();
+    drawGems();
+    drawExit();
+    drawPlayer();
+    drawHUD();
+    drawLevelWin();
+
+  } else if (gs === 'gameover') {
+    drawMaze();
+    drawGems();
+    drawExit();
+    drawPlayer();
+    drawHUD();
+    drawGameOver();
+  }
+
+  requestAnimationFrame(gameLoop);
+}
+
+requestAnimationFrame(function(ts) { lastTS = ts; gameLoop(ts); });
+</script>
+</body>
+</html>
