@@ -1,0 +1,739 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Chromatic Serpent</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #060610;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      overflow: hidden;
+      font-family: 'Courier New', monospace;
+    }
+    canvas {
+      display: block;
+      image-rendering: pixelated;
+    }
+  </style>
+</head>
+<body>
+<canvas id="gameCanvas"></canvas>
+<script>
+// Genre: Snake variant | Date: 2026-04-10
+// Chromatic Serpent — eat colored orbs for special effects and chase the high score!
+
+// ─── POLYFILL ───────────────────────────────────────────────────────────────
+if (!CanvasRenderingContext2D.prototype.roundRect) {
+  CanvasRenderingContext2D.prototype.roundRect = function(x, y, w, h, r) {
+    if (w < 2 * r) r = w / 2;
+    if (h < 2 * r) r = h / 2;
+    this.beginPath();
+    this.moveTo(x + r, y);
+    this.arcTo(x + w, y,     x + w, y + h, r);
+    this.arcTo(x + w, y + h, x,     y + h, r);
+    this.arcTo(x,     y + h, x,     y,     r);
+    this.arcTo(x,     y,     x + w, y,     r);
+    this.closePath();
+    return this;
+  };
+}
+
+// ─── CANVAS / SIZING ────────────────────────────────────────────────────────
+const canvas = document.getElementById('gameCanvas');
+const ctx    = canvas.getContext('2d');
+
+const COLS = 28;
+const ROWS = 22;
+let CELL   = 28;   // pixel size of one grid cell — recalculated on resize
+
+function resize() {
+  const maxW = window.innerWidth  * 0.98;
+  const maxH = window.innerHeight * 0.98;
+  CELL = Math.floor(Math.min(maxW / COLS, maxH / (ROWS + 3)));  // +3 rows for HUD
+  canvas.width  = COLS * CELL;
+  canvas.height = (ROWS + 3) * CELL;
+}
+resize();
+window.addEventListener('resize', () => { resize(); });
+
+// ─── CONSTANTS ──────────────────────────────────────────────────────────────
+const GRID_OFFSET_Y = CELL * 2.5; // top HUD height
+
+// Orb types  {color, label, pts, effect, duration(ms)}
+const ORB_TYPES = [
+  { id: 'gold',    color: '#FFD700', glow: '#FF9900', label: 'GOLD',    pts: 10, effect: 'normal',     dur: 0    },
+  { id: 'crimson', color: '#FF3366', glow: '#FF0033', label: 'FAST',    pts: 20, effect: 'speed',      dur: 4000 },
+  { id: 'cyan',    color: '#00FFEE', glow: '#00BBCC', label: 'SLOW',    pts: 15, effect: 'slow',       dur: 4000 },
+  { id: 'violet',  color: '#CC44FF', glow: '#8800CC', label: '2×',      pts: 5,  effect: 'double',     dur: 6000 },
+  { id: 'lime',    color: '#66FF44', glow: '#33BB00', label: 'SHRINK',  pts: 30, effect: 'shrink',     dur: 0    },
+  { id: 'white',   color: '#FFFFFF', glow: '#AAAAFF', label: 'GHOST',   pts: 8,  effect: 'ghost',      dur: 3500 },
+];
+
+// How often each orb type appears (weights, proportional)
+const ORB_WEIGHTS = [40, 20, 20, 10, 5, 5];
+
+// ─── GAME STATE ─────────────────────────────────────────────────────────────
+let state      = 'title';   // 'title' | 'playing' | 'gameover'
+let score      = 0;
+let highScore  = 0;
+let level      = 1;
+let snake      = [];        // array of {cx, cy} grid coords
+let dir        = { x: 1, y: 0 };
+let nextDir    = { x: 1, y: 0 };
+let orbs       = [];        // [{cx, cy, type, spawnTime}]
+let effects    = [];        // active timed effects [{effect, expiresAt}]
+let particles  = [];        // visual sparks
+let stepInterval = 160;     // ms between moves
+let lastStep   = 0;
+let animFrame  = null;
+let lastTime   = 0;
+
+// Input
+const keys = {};
+document.addEventListener('keydown', e => {
+  keys[e.code] = true;
+  handleInput(e.code);
+});
+document.addEventListener('keyup',  e => { keys[e.code] = false; });
+
+// ─── INPUT HANDLER ──────────────────────────────────────────────────────────
+let inputCooldown = 0; // prevent double-direction change per frame
+function handleInput(code) {
+  if (state === 'title' || state === 'gameover') {
+    startGame();
+    return;
+  }
+  if (state !== 'playing') return;
+
+  const now = performance.now();
+  if (now - inputCooldown < 60) return;
+  inputCooldown = now;
+
+  if ((code === 'ArrowUp'    || code === 'KeyW') && dir.y !== 1)  nextDir = { x:  0, y: -1 };
+  if ((code === 'ArrowDown'  || code === 'KeyS') && dir.y !== -1) nextDir = { x:  0, y:  1 };
+  if ((code === 'ArrowLeft'  || code === 'KeyA') && dir.x !== 1)  nextDir = { x: -1, y:  0 };
+  if ((code === 'ArrowRight' || code === 'KeyD') && dir.x !== -1) nextDir = { x:  1, y:  0 };
+}
+
+// ─── GAME INIT ───────────────────────────────────────────────────────────────
+function startGame() {
+  score       = 0;
+  level       = 1;
+  stepInterval = 160;
+  dir         = { x: 1, y: 0 };
+  nextDir     = { x: 1, y: 0 };
+  effects     = [];
+  particles   = [];
+  orbs        = [];
+  lastStep    = 0;
+  inputCooldown = 0;
+
+  // Start snake in center, 4 cells long facing right
+  const startX = Math.floor(COLS / 2) - 2;
+  const startY = Math.floor(ROWS / 2);
+  snake = [];
+  for (let i = 3; i >= 0; i--) snake.push({ cx: startX + i, cy: startY });
+
+  // Spawn first orb
+  spawnOrb();
+  state = 'playing';
+}
+
+// ─── ORB SPAWNING ────────────────────────────────────────────────────────────
+function pickOrbType() {
+  const total = ORB_WEIGHTS.reduce((a, b) => a + b, 0);
+  let r = Math.random() * total;
+  for (let i = 0; i < ORB_WEIGHTS.length; i++) {
+    r -= ORB_WEIGHTS[i];
+    if (r <= 0) return ORB_TYPES[i];
+  }
+  return ORB_TYPES[0];
+}
+
+function cellOccupied(cx, cy) {
+  for (const s of snake)     if (s.cx === cx && s.cy === cy) return true;
+  for (const o of orbs)      if (o.cx === cx && o.cy === cy) return true;
+  return false;
+}
+
+function spawnOrb() {
+  // Don't exceed 3 orbs at once
+  if (orbs.length >= 3) return;
+  let cx, cy, tries = 0;
+  do {
+    cx = Math.floor(Math.random() * COLS);
+    cy = Math.floor(Math.random() * ROWS);
+    tries++;
+  } while (cellOccupied(cx, cy) && tries < 200);
+  if (tries < 200) {
+    orbs.push({ cx, cy, type: pickOrbType(), spawnTime: performance.now() });
+  }
+}
+
+// ─── EFFECTS HELPERS ────────────────────────────────────────────────────────
+function hasEffect(name) {
+  const now = performance.now();
+  return effects.some(e => e.effect === name && e.expiresAt > now);
+}
+
+function addEffect(name, dur) {
+  if (dur <= 0) return;
+  // Replace existing same effect
+  effects = effects.filter(e => e.effect !== name);
+  effects.push({ effect: name, expiresAt: performance.now() + dur });
+}
+
+function purgeExpiredEffects() {
+  const now = performance.now();
+  effects = effects.filter(e => e.expiresAt > now);
+}
+
+// ─── PARTICLES ───────────────────────────────────────────────────────────────
+function spawnParticles(px, py, color, count) {
+  for (let i = 0; i < count; i++) {
+    const angle = (Math.PI * 2 * i) / count + Math.random() * 0.5;
+    const speed = 1.5 + Math.random() * 3;
+    particles.push({
+      x: px, y: py,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed,
+      life: 1.0,
+      decay: 0.03 + Math.random() * 0.03,
+      color,
+      size: 2 + Math.random() * 3
+    });
+  }
+}
+
+function updateParticles() {
+  for (const p of particles) {
+    p.x   += p.vx;
+    p.y   += p.vy;
+    p.vx  *= 0.93;
+    p.vy  *= 0.93;
+    p.life -= p.decay;
+  }
+  particles = particles.filter(p => p.life > 0);
+}
+
+// ─── GAME STEP ──────────────────────────────────────────────────────────────
+function gameStep() {
+  purgeExpiredEffects();
+
+  // Compute speed
+  let interval = stepInterval;
+  if (hasEffect('speed')) interval = Math.max(60, interval * 0.55);
+  if (hasEffect('slow'))  interval = Math.min(320, interval * 1.7);
+
+  const now = performance.now();
+  if (now - lastStep < interval) return;
+  lastStep = now;
+
+  // Apply queued direction
+  dir = { ...nextDir };
+
+  // New head position
+  let head = { cx: snake[0].cx + dir.x, cy: snake[0].cy + dir.y };
+
+  // Wall collision (unless ghost)
+  if (!hasEffect('ghost')) {
+    if (head.cx < 0 || head.cx >= COLS || head.cy < 0 || head.cy >= ROWS) {
+      endGame(); return;
+    }
+    // Self collision
+    for (let i = 1; i < snake.length - 1; i++) {
+      if (snake[i].cx === head.cx && snake[i].cy === head.cy) {
+        endGame(); return;
+      }
+    }
+  } else {
+    // Wrap around in ghost mode
+    head.cx = ((head.cx % COLS) + COLS) % COLS;
+    head.cy = ((head.cy % ROWS) + ROWS) % ROWS;
+  }
+
+  // Check orb consumption
+  let ate = false;
+  let ateOrb = null;
+  for (let i = 0; i < orbs.length; i++) {
+    if (orbs[i].cx === head.cx && orbs[i].cy === head.cy) {
+      ateOrb = orbs[i];
+      orbs.splice(i, 1);
+      ate = true;
+      break;
+    }
+  }
+
+  // Move snake
+  snake.unshift(head);
+  if (!ate) {
+    snake.pop();
+  }
+
+  if (ate && ateOrb) {
+    const t = ateOrb.type;
+    let pts = t.pts * (hasEffect('double') ? 2 : 1);
+    score += pts;
+
+    // Grid center of orb in pixels
+    const px = ateOrb.cx * CELL + CELL / 2;
+    const py = ateOrb.cy * CELL + CELL / 2 + GRID_OFFSET_Y;
+    spawnParticles(px, py, t.color, 12);
+
+    // Apply effect
+    if (t.effect === 'shrink') {
+      // Remove last 3 segments (but keep at least 3)
+      const remove = Math.min(3, snake.length - 3);
+      snake.splice(snake.length - remove, remove);
+    } else if (t.effect !== 'normal') {
+      addEffect(t.effect, t.dur);
+    }
+
+    // Spawn new orbs to keep 2-3 on board
+    spawnOrb();
+    if (orbs.length < 2) spawnOrb();
+
+    // Level up every 100 points
+    const newLevel = Math.floor(score / 100) + 1;
+    if (newLevel > level) {
+      level = newLevel;
+      stepInterval = Math.max(80, 160 - (level - 1) * 10);
+    }
+  }
+
+  // Occasionally spawn extra orb
+  if (Math.random() < 0.04 && orbs.length < 3) spawnOrb();
+}
+
+function endGame() {
+  if (score > highScore) highScore = score;
+  state = 'gameover';
+}
+
+// ─── DRAWING ────────────────────────────────────────────────────────────────
+let titlePulse = 0; // for blinking
+
+function draw(now) {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  // Background
+  ctx.fillStyle = '#060610';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  if (state === 'title')    drawTitle(now);
+  else if (state === 'playing')  { drawGame(now); drawHUD(); }
+  else if (state === 'gameover') { drawGame(now); drawHUD(); drawGameOver(now); }
+}
+
+// ── Grid dots ──────────────────────────────────────────────────────────────
+function drawGrid() {
+  ctx.fillStyle = 'rgba(255,255,255,0.035)';
+  for (let col = 0; col < COLS; col++) {
+    for (let row = 0; row < ROWS; row++) {
+      const x = col * CELL + CELL / 2;
+      const y = row * CELL + CELL / 2 + GRID_OFFSET_Y;
+      ctx.beginPath();
+      ctx.arc(x, y, 1, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+}
+
+// ── Snake drawing ──────────────────────────────────────────────────────────
+function drawSnake() {
+  const ghost   = hasEffect('ghost');
+  const isDouble = hasEffect('double');
+  const isFast  = hasEffect('speed');
+  const isSlow  = hasEffect('slow');
+
+  // Choose snake color based on active effect
+  let bodyColor, glowColor;
+  if (ghost) {
+    bodyColor = 'rgba(200,200,255,0.5)';
+    glowColor = '#8888FF';
+  } else if (isDouble) {
+    bodyColor = '#CC44FF';
+    glowColor = '#FF88FF';
+  } else if (isFast) {
+    bodyColor = '#FF3366';
+    glowColor = '#FF9999';
+  } else if (isSlow) {
+    bodyColor = '#00FFEE';
+    glowColor = '#00BBCC';
+  } else {
+    bodyColor = '#44FF88';
+    glowColor = '#00CC55';
+  }
+
+  for (let i = snake.length - 1; i >= 0; i--) {
+    const seg  = snake[i];
+    const x    = seg.cx * CELL + GRID_OFFSET_Y * 0 + 1;
+    const y    = seg.cy * CELL + GRID_OFFSET_Y + 1;
+    const size = CELL - 2;
+    const rad  = i === 0 ? 6 : 4;
+
+    // Glow for head and near-head
+    if (i < 5) {
+      ctx.save();
+      ctx.shadowColor = glowColor;
+      ctx.shadowBlur  = i === 0 ? 18 : 8;
+      ctx.fillStyle   = bodyColor;
+      ctx.roundRect(x, y, size, size, rad);
+      ctx.fill();
+      ctx.restore();
+    } else {
+      const alpha = ghost ? 0.3 : (0.5 + 0.5 * (1 - i / snake.length));
+      ctx.fillStyle = ghost
+        ? `rgba(200,200,255,${alpha})`
+        : bodyColor;
+      ctx.roundRect(x, y, size, size, rad);
+      ctx.fill();
+    }
+
+    // Head eyes
+    if (i === 0) {
+      const eyeOffset = CELL * 0.22;
+      const eyeRadius = CELL * 0.1;
+      const eyeY      = y + size * 0.28;
+      const eyeX1     = x + size * 0.28;
+      const eyeX2     = x + size * 0.72;
+
+      ctx.fillStyle = '#060610';
+      ctx.beginPath(); ctx.arc(eyeX1, eyeY, eyeRadius, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(eyeX2, eyeY, eyeRadius, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#FFFFFF';
+      ctx.beginPath(); ctx.arc(eyeX1 + 1, eyeY - 1, eyeRadius * 0.5, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(eyeX2 + 1, eyeY - 1, eyeRadius * 0.5, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+}
+
+// ── Orbs drawing ──────────────────────────────────────────────────────────
+function drawOrbs(now) {
+  for (const orb of orbs) {
+    const x   = orb.cx * CELL + CELL / 2;
+    const y   = orb.cy * CELL + CELL / 2 + GRID_OFFSET_Y;
+    const age = (now - orb.spawnTime) / 1000;
+    const bob = Math.sin(age * 3 + orb.cx) * 2; // gentle bob
+    const t   = orb.type;
+    const r   = CELL * 0.38;
+
+    ctx.save();
+    ctx.shadowColor = t.glow;
+    ctx.shadowBlur  = 16 + Math.sin(age * 4) * 4;
+
+    // Outer ring pulse
+    ctx.strokeStyle = t.color;
+    ctx.lineWidth   = 1.5;
+    ctx.globalAlpha = 0.35 + 0.15 * Math.sin(age * 5);
+    ctx.beginPath();
+    ctx.arc(x, y + bob, r + 3 + Math.sin(age * 4) * 2, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+
+    // Inner fill
+    const grad = ctx.createRadialGradient(x - r * 0.3, y + bob - r * 0.3, r * 0.1, x, y + bob, r);
+    grad.addColorStop(0, '#FFFFFF');
+    grad.addColorStop(0.3, t.color);
+    grad.addColorStop(1, t.glow);
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(x, y + bob, r, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Label
+    ctx.shadowBlur  = 0;
+    ctx.globalAlpha = 0.85;
+    ctx.fillStyle   = '#FFFFFF';
+    ctx.font        = `bold ${Math.floor(CELL * 0.28)}px Courier New`;
+    ctx.textAlign   = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(t.label, x, y + bob);
+
+    ctx.restore();
+  }
+}
+
+// ── Particles ──────────────────────────────────────────────────────────────
+function drawParticles() {
+  for (const p of particles) {
+    ctx.save();
+    ctx.globalAlpha = p.life;
+    ctx.fillStyle   = p.color;
+    ctx.shadowColor = p.color;
+    ctx.shadowBlur  = 6;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+// ── HUD ────────────────────────────────────────────────────────────────────
+function drawHUD() {
+  const pad = CELL * 0.4;
+  const fy  = CELL * 1.5;
+  const fs  = Math.max(12, Math.floor(CELL * 0.55));
+
+  // Background strip
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  ctx.fillRect(0, 0, canvas.width, GRID_OFFSET_Y - 2);
+
+  // Score
+  ctx.fillStyle = '#FFD700';
+  ctx.font      = `bold ${fs}px Courier New`;
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(`SCORE  ${score}`, pad, fy);
+
+  // Level
+  ctx.fillStyle = '#44FF88';
+  ctx.textAlign = 'center';
+  ctx.fillText(`LV ${level}`, canvas.width / 2, fy);
+
+  // High score
+  ctx.fillStyle = '#CC44FF';
+  ctx.textAlign = 'right';
+  ctx.fillText(`BEST  ${highScore}`, canvas.width - pad, fy);
+
+  // Active effects bar
+  const now = performance.now();
+  const activeEffects = effects.filter(e => e.expiresAt > now);
+  if (activeEffects.length > 0) {
+    let exX = pad;
+    const barY = GRID_OFFSET_Y - CELL * 0.75;
+    for (const eff of activeEffects) {
+      const remaining = (eff.expiresAt - now) / 1000;
+      const orbType   = ORB_TYPES.find(o => o.effect === eff.effect);
+      if (!orbType) continue;
+      const label     = orbType.label;
+      const color     = orbType.color;
+      const maxDur    = orbType.dur / 1000;
+      const frac      = Math.min(1, remaining / maxDur);
+
+      // Badge
+      ctx.fillStyle = color + '33';
+      ctx.roundRect(exX, barY - CELL * 0.25, CELL * 2.5, CELL * 0.5, 4);
+      ctx.fill();
+
+      // Progress fill
+      ctx.fillStyle = color + '88';
+      ctx.roundRect(exX, barY - CELL * 0.25, CELL * 2.5 * frac, CELL * 0.5, 4);
+      ctx.fill();
+
+      ctx.fillStyle = color;
+      ctx.font      = `bold ${Math.max(9, Math.floor(CELL * 0.35))}px Courier New`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(label, exX + CELL * 1.25, barY);
+      exX += CELL * 2.8;
+    }
+  }
+}
+
+// ── Title screen ───────────────────────────────────────────────────────────
+function drawTitle(now) {
+  titlePulse = now / 1000;
+
+  // Background grid hint
+  ctx.save();
+  ctx.globalAlpha = 0.15;
+  ctx.strokeStyle = '#44FF88';
+  ctx.lineWidth   = 0.5;
+  for (let c = 0; c <= COLS; c++) {
+    ctx.beginPath();
+    ctx.moveTo(c * CELL, 0);
+    ctx.lineTo(c * CELL, canvas.height);
+    ctx.stroke();
+  }
+  for (let r = 0; r <= ROWS + 3; r++) {
+    ctx.beginPath();
+    ctx.moveTo(0, r * CELL);
+    ctx.lineTo(canvas.width, r * CELL);
+    ctx.stroke();
+  }
+  ctx.restore();
+
+  const cx = canvas.width  / 2;
+  const cy = canvas.height / 2;
+
+  // Title glow
+  const titleSize = Math.max(28, Math.floor(CELL * 1.6));
+  ctx.save();
+  ctx.shadowColor = '#44FF88';
+  ctx.shadowBlur  = 30 + Math.sin(titlePulse * 2) * 8;
+  ctx.fillStyle   = '#44FF88';
+  ctx.font        = `bold ${titleSize}px Courier New`;
+  ctx.textAlign   = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('CHROMATIC', cx, cy - CELL * 3.2);
+  ctx.fillStyle = '#CC44FF';
+  ctx.shadowColor = '#CC44FF';
+  ctx.fillText('SERPENT', cx, cy - CELL * 1.8);
+  ctx.restore();
+
+  // Tagline
+  ctx.fillStyle = '#AAAAFF';
+  ctx.font      = `${Math.max(11, Math.floor(CELL * 0.55))}px Courier New`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('Eat color-coded orbs — each one has a secret power!', cx, cy - CELL * 0.6);
+
+  // Orb legend
+  const legendY = cy + CELL * 0.6;
+  const orbSpacing = canvas.width / (ORB_TYPES.length + 1);
+  ORB_TYPES.forEach((t, i) => {
+    const ox = orbSpacing * (i + 1);
+    const or = Math.max(8, CELL * 0.3);
+    ctx.save();
+    ctx.shadowColor = t.glow;
+    ctx.shadowBlur  = 10;
+    ctx.fillStyle   = t.color;
+    ctx.beginPath();
+    ctx.arc(ox, legendY, or, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+    ctx.fillStyle = '#CCCCCC';
+    ctx.font      = `${Math.max(9, Math.floor(CELL * 0.38))}px Courier New`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.fillText(t.label, ox, legendY + or + 4);
+    ctx.fillStyle = '#888888';
+    ctx.font      = `${Math.max(8, Math.floor(CELL * 0.3))}px Courier New`;
+    ctx.fillText(`+${t.pts}pts`, ox, legendY + or + CELL * 0.52);
+  });
+
+  // Controls
+  const ctrlY = cy + CELL * 2.6;
+  ctx.fillStyle = '#666688';
+  ctx.font      = `${Math.max(10, Math.floor(CELL * 0.42))}px Courier New`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('Arrow Keys / WASD  — steer the serpent', cx, ctrlY);
+
+  // High score
+  if (highScore > 0) {
+    ctx.fillStyle = '#CC44FF';
+    ctx.font      = `bold ${Math.max(11, Math.floor(CELL * 0.5))}px Courier New`;
+    ctx.fillText(`BEST SCORE:  ${highScore}`, cx, ctrlY + CELL * 0.9);
+  }
+
+  // Blinking prompt
+  if (Math.floor(titlePulse * 1.5) % 2 === 0) {
+    ctx.fillStyle = '#FFFFFF';
+    ctx.font      = `bold ${Math.max(12, Math.floor(CELL * 0.55))}px Courier New`;
+    ctx.fillText('— PRESS ANY KEY TO SLITHER —', cx, ctrlY + CELL * 1.9);
+  }
+}
+
+// ── Game over screen ───────────────────────────────────────────────────────
+function drawGameOver(now) {
+  // Semi-transparent overlay
+  ctx.fillStyle = 'rgba(6,6,16,0.75)';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  const cx = canvas.width  / 2;
+  const cy = canvas.height / 2;
+
+  // Panel
+  const pw = Math.min(canvas.width * 0.82, 480);
+  const ph = CELL * 9;
+  const px = cx - pw / 2;
+  const py = cy - ph / 2;
+
+  ctx.save();
+  ctx.shadowColor = '#FF3366';
+  ctx.shadowBlur  = 30;
+  ctx.strokeStyle = '#FF3366';
+  ctx.lineWidth   = 2;
+  ctx.fillStyle   = 'rgba(10,5,20,0.9)';
+  ctx.roundRect(px, py, pw, ph, 12);
+  ctx.fill();
+  ctx.stroke();
+  ctx.restore();
+
+  ctx.fillStyle = '#FF3366';
+  ctx.font      = `bold ${Math.max(20, Math.floor(CELL * 1.1))}px Courier New`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('GAME OVER', cx, py + ph * 0.2);
+
+  ctx.fillStyle = '#FFD700';
+  ctx.font      = `bold ${Math.max(16, Math.floor(CELL * 0.85))}px Courier New`;
+  ctx.fillText(`SCORE:  ${score}`, cx, py + ph * 0.42);
+
+  if (score >= highScore && score > 0) {
+    ctx.fillStyle = '#CC44FF';
+    ctx.font      = `bold ${Math.max(13, Math.floor(CELL * 0.6))}px Courier New`;
+    ctx.fillText('✦ NEW HIGH SCORE! ✦', cx, py + ph * 0.57);
+  } else {
+    ctx.fillStyle = '#CC44FF';
+    ctx.font      = `${Math.max(12, Math.floor(CELL * 0.52))}px Courier New`;
+    ctx.fillText(`BEST:  ${highScore}`, cx, py + ph * 0.57);
+  }
+
+  ctx.fillStyle = '#888899';
+  ctx.font      = `${Math.max(11, Math.floor(CELL * 0.46))}px Courier New`;
+  ctx.fillText(`LENGTH: ${snake.length}  |  LEVEL: ${level}`, cx, py + ph * 0.71);
+
+  // Blinking restart
+  const pulse = now / 1000;
+  if (Math.floor(pulse * 1.5) % 2 === 0) {
+    ctx.fillStyle = '#FFFFFF';
+    ctx.font      = `bold ${Math.max(11, Math.floor(CELL * 0.5))}px Courier New`;
+    ctx.fillText('PRESS ANY KEY TO PLAY AGAIN', cx, py + ph * 0.87);
+  }
+}
+
+// ── Full game scene ────────────────────────────────────────────────────────
+function drawGame(now) {
+  drawGrid();
+  updateParticles();
+  drawParticles();
+  drawOrbs(now);
+  drawSnake();
+}
+
+// ─── MAIN LOOP ───────────────────────────────────────────────────────────────
+function loop(now) {
+  animFrame = requestAnimationFrame(loop);
+  if (state === 'playing') gameStep();
+  draw(now);
+}
+
+// ─── MOUSE / TOUCH SUPPORT (secondary) ──────────────────────────────────────
+canvas.addEventListener('click', () => {
+  if (state === 'title' || state === 'gameover') startGame();
+});
+
+// On-screen swipe for touch
+let touchStartX = 0, touchStartY = 0;
+canvas.addEventListener('touchstart', e => {
+  touchStartX = e.touches[0].clientX;
+  touchStartY = e.touches[0].clientY;
+  e.preventDefault();
+}, { passive: false });
+canvas.addEventListener('touchend', e => {
+  const dx = e.changedTouches[0].clientX - touchStartX;
+  const dy = e.changedTouches[0].clientY - touchStartY;
+  if (state !== 'playing') { startGame(); return; }
+  if (Math.abs(dx) > Math.abs(dy)) {
+    if (dx > 20 && dir.x !== -1) nextDir = { x:  1, y: 0 };
+    if (dx < -20 && dir.x !== 1) nextDir = { x: -1, y: 0 };
+  } else {
+    if (dy > 20 && dir.y !== -1) nextDir = { x: 0, y:  1 };
+    if (dy < -20 && dir.y !== 1) nextDir = { x: 0, y: -1 };
+  }
+  e.preventDefault();
+}, { passive: false });
+
+// ─── KICK OFF ────────────────────────────────────────────────────────────────
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

@@ -1,0 +1,757 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Deep Glow Fishing</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #000;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 100vh;
+    overflow: hidden;
+    font-family: 'Courier New', monospace;
+  }
+  canvas { display: block; cursor: crosshair; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+// Genre: Fishing | Date: 2026-04-12
+
+// ─── roundRect polyfill ───────────────────────────────────────────────────────
+if (!CanvasRenderingContext2D.prototype.roundRect) {
+  CanvasRenderingContext2D.prototype.roundRect = function(x, y, w, h, r) {
+    r = Math.min(r, w / 2, h / 2);
+    this.beginPath();
+    this.moveTo(x + r, y);
+    this.lineTo(x + w - r, y);
+    this.quadraticCurveTo(x + w, y, x + w, y + r);
+    this.lineTo(x + w, y + h - r);
+    this.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+    this.lineTo(x + r, y + h);
+    this.quadraticCurveTo(x, y + h, x, y + h - r);
+    this.lineTo(x, y + r);
+    this.quadraticCurveTo(x, y, x + r, y);
+    this.closePath();
+  };
+}
+
+// ─── Canvas & resize ─────────────────────────────────────────────────────────
+const canvas = document.getElementById('game');
+const ctx    = canvas.getContext('2d');
+let W = 800, H = 600;
+
+function resize() {
+  const sx = window.innerWidth  / 800;
+  const sy = window.innerHeight / 600;
+  const s  = Math.min(sx, sy);
+  W = Math.round(800 * s);
+  H = Math.round(600 * s);
+  canvas.width  = W;
+  canvas.height = H;
+}
+resize();
+window.addEventListener('resize', resize);
+
+// ─── Water zone fractions of H ───────────────────────────────────────────────
+const SURF       = 0.13;   // water surface starts here
+const SHALLOW_END = 0.40;
+const MID_END     = 0.70;
+const DEEP_END    = 0.88;
+
+// ─── Fish catalogue ──────────────────────────────────────────────────────────
+const FISH_TYPES = [
+  { name:'Goldfish',   col:'#FFB347', glow:'#FF8C00', sz:0.042, spd:1.40, pts:10,  zone:[SURF,      SHALLOW_END], prob:0.38 },
+  { name:'Trout',      col:'#7EC8E3', glow:'#00A8E8', sz:0.055, spd:1.10, pts:25,  zone:[SURF,      SHALLOW_END], prob:0.25 },
+  { name:'Tuna',       col:'#4A90D9', glow:'#0066CC', sz:0.070, spd:1.60, pts:50,  zone:[SHALLOW_END, MID_END],  prob:0.20 },
+  { name:'Anglerfish', col:'#9B4FE8', glow:'#CF8FFF', sz:0.082, spd:0.70, pts:90,  zone:[MID_END,   DEEP_END],   prob:0.12 },
+  { name:'Kraken',     col:'#FF1E9A', glow:'#FF69B4', sz:0.100, spd:0.50, pts:160, zone:[MID_END,   DEEP_END],   prob:0.05 },
+];
+
+// ─── Game state ───────────────────────────────────────────────────────────────
+const S = { TITLE:0, PLAYING:1, GAMEOVER:2 };
+let state     = S.TITLE;
+let score     = 0;
+let highScore = 0;
+let timeLeft  = 90;
+let caught    = 0;
+
+let blinkOn  = true;
+let blinkT   = 0;
+let lastTime = 0;
+
+// ─── Game objects ─────────────────────────────────────────────────────────────
+let rodX  = 0.5;   // fraction of W, boat centre
+let hook  = { x:0.5, y:SURF, falling:false, rising:false, cargo:null, wobble:0 };
+const HOOK_FALL_SPD = 0.0028;
+const HOOK_RISE_SPD = 0.0040;
+
+let fishes      = [];
+let bubbles     = [];
+let particles   = [];
+let scorePops   = [];
+
+let fishTimer   = 0;
+let bubbleTimer = 0;
+
+// ─── Input ───────────────────────────────────────────────────────────────────
+const keys = {};
+let mouseXFrac = null;
+
+window.addEventListener('keydown', e => {
+  if (['Space','ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.code)) e.preventDefault();
+  if (!keys[e.code]) handleAction();
+  keys[e.code] = true;
+});
+window.addEventListener('keyup', e => { keys[e.code] = false; });
+
+canvas.addEventListener('mousemove', e => {
+  const r = canvas.getBoundingClientRect();
+  mouseXFrac = (e.clientX - r.left) / W;
+});
+canvas.addEventListener('mousedown', e => { handleAction(); e.preventDefault(); });
+canvas.addEventListener('touchstart', e => {
+  const r = canvas.getBoundingClientRect();
+  mouseXFrac = (e.touches[0].clientX - r.left) / W;
+  handleAction();
+  e.preventDefault();
+}, { passive:false });
+canvas.addEventListener('touchmove', e => {
+  const r = canvas.getBoundingClientRect();
+  mouseXFrac = (e.touches[0].clientX - r.left) / W;
+  e.preventDefault();
+}, { passive:false });
+
+function handleAction() {
+  if (state === S.TITLE)    { startGame(); return; }
+  if (state === S.GAMEOVER) { startGame(); return; }
+  if (state === S.PLAYING && !hook.falling && !hook.rising) {
+    hook.falling = true;
+    hook.x  = rodX;
+    hook.y  = SURF;
+    hook.cargo = null;
+  }
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+function rnd(a, b) { return a + Math.random() * (b - a); }
+
+function makeBubble() {
+  return {
+    x:    Math.random(),
+    y:    rnd(SURF, 1.0),
+    r:    rnd(0.003, 0.009),
+    spd:  rnd(0.0004, 0.0012),
+    alpha:rnd(0.2, 0.55),
+    drift:rnd(-0.0002, 0.0002),
+  };
+}
+
+function spawnFish() {
+  const roll = Math.random();
+  let cum = 0, type = FISH_TYPES[0];
+  for (const t of FISH_TYPES) { cum += t.prob; if (roll <= cum) { type = t; break; } }
+  const zH  = type.zone[1] - type.zone[0];
+  const goR = Math.random() > 0.5;
+  fishes.push({
+    type,
+    x:    goR ? -0.12 : 1.12,
+    y:    rnd(type.zone[0], type.zone[1]),
+    dir:  goR ? 1 : -1,
+    tail: rnd(0, Math.PI * 2),
+    caught: false,
+  });
+}
+
+function burst(fx, fy, col) {
+  for (let i = 0; i < 8; i++) {
+    const a = (Math.PI * 2 * i) / 8 + rnd(-0.3, 0.3);
+    const s = rnd(0.003, 0.007);
+    particles.push({ x:fx, y:fy, col, vx:Math.cos(a)*s, vy:Math.sin(a)*s, life:1.0, r:rnd(0.005,0.009) });
+  }
+}
+
+// ─── Init / reset ─────────────────────────────────────────────────────────────
+function startGame() {
+  state    = S.PLAYING;
+  score    = 0;
+  timeLeft = 90;
+  caught   = 0;
+  fishes   = [];
+  particles= [];
+  scorePops= [];
+  blinkOn  = true;
+  blinkT   = 0;
+  hook     = { x:0.5, y:SURF, falling:false, rising:false, cargo:null, wobble:0 };
+  rodX     = 0.5;
+  for (let i = 0; i < 6; i++) spawnFish();
+}
+
+// Prefill bubbles for both title and game
+for (let i = 0; i < 18; i++) bubbles.push(makeBubble());
+
+// Title fish
+for (let i = 0; i < 5; i++) spawnFish();
+
+// ─── Update ──────────────────────────────────────────────────────────────────
+function update(dt) {
+  // blink
+  blinkT += dt;
+  if (blinkT > 520) { blinkOn = !blinkOn; blinkT = 0; }
+
+  // bubbles always float upward
+  for (const b of bubbles) {
+    b.y -= b.spd * dt / 16;
+    b.x += b.drift;
+    if (b.y < SURF - 0.02) Object.assign(b, makeBubble());
+  }
+  bubbleTimer += dt;
+  if (bubbleTimer > 1800 && bubbles.length < 22) {
+    bubbles.push(makeBubble()); bubbleTimer = 0;
+  }
+
+  if (state !== S.PLAYING) {
+    // keep title fish moving
+    for (const f of fishes) {
+      f.x += f.dir * f.type.spd * 0.0007 * dt / 16;
+      f.tail += 0.08 * dt / 16;
+      if (f.x > 1.15) f.dir = -1;
+      if (f.x < -0.15) f.dir = 1;
+    }
+    return;
+  }
+
+  // timer
+  timeLeft -= dt / 1000;
+  if (timeLeft <= 0) {
+    timeLeft = 0;
+    highScore = Math.max(highScore, score);
+    state = S.GAMEOVER;
+    return;
+  }
+
+  // rod follows mouse (smooth) or arrow keys
+  if (mouseXFrac !== null) rodX += (mouseXFrac - rodX) * 0.18;
+  if (keys['ArrowLeft'])  rodX -= 0.003 * dt / 16;
+  if (keys['ArrowRight']) rodX += 0.003 * dt / 16;
+  rodX = Math.max(0.06, Math.min(0.94, rodX));
+
+  // hook physics
+  if (hook.falling) {
+    hook.y += HOOK_FALL_SPD * dt / 16;
+    // hit bottom
+    if (hook.y >= DEEP_END + 0.04) {
+      hook.falling = false;
+      hook.rising  = true;
+    }
+    // catch a fish
+    if (!hook.cargo) {
+      for (const f of fishes) {
+        if (f.caught) continue;
+        const dx = (hook.x - f.x) * W;
+        const dy = (hook.y - f.y) * H;
+        if (Math.sqrt(dx*dx + dy*dy) < f.type.sz * W * 0.55) {
+          f.caught      = true;
+          hook.cargo    = f;
+          hook.falling  = false;
+          hook.rising   = true;
+          hook.wobble   = Math.PI * 1.5;
+          burst(f.x, f.y, f.type.glow);
+          break;
+        }
+      }
+    }
+  }
+
+  if (hook.rising) {
+    hook.y -= HOOK_RISE_SPD * dt / 16;
+    if (hook.cargo) { hook.cargo.x = hook.x; hook.cargo.y = hook.y + 0.045; }
+    if (hook.y <= SURF) {
+      hook.y      = SURF;
+      hook.rising = false;
+      if (hook.cargo) {
+        score += hook.cargo.type.pts;
+        caught++;
+        scorePops.push({ x:hook.x, y:SURF - 0.02, pts:hook.cargo.type.pts, life:1.6 });
+        fishes = fishes.filter(f => f !== hook.cargo);
+        hook.cargo = null;
+      }
+    }
+  }
+
+  hook.wobble *= Math.pow(0.88, dt / 16);
+
+  // move fish
+  for (const f of fishes) {
+    if (f.caught) continue;
+    f.x += f.dir * f.type.spd * 0.0009 * dt / 16;
+    f.tail += 0.09 * dt / 16;
+    if (f.x > 1.15) f.dir = -1;
+    if (f.x < -0.15) f.dir = 1;
+  }
+  fishes = fishes.filter(f => f.x > -0.2 && f.x < 1.2);
+  fishTimer += dt;
+  if (fishTimer > 1800 && fishes.length < 9) { spawnFish(); fishTimer = 0; }
+
+  // particles
+  for (const p of particles) {
+    p.x += p.vx * dt / 16;
+    p.y += p.vy * dt / 16;
+    p.life -= 0.018 * dt / 16;
+  }
+  particles = particles.filter(p => p.life > 0);
+
+  // score pops
+  for (const sp of scorePops) {
+    sp.y    -= 0.0018 * dt / 16;
+    sp.life -= 0.016 * dt / 16;
+  }
+  scorePops = scorePops.filter(sp => sp.life > 0);
+}
+
+// ─── Draw helpers ─────────────────────────────────────────────────────────────
+function drawOcean(ts) {
+  // Night sky
+  let g = ctx.createLinearGradient(0, 0, 0, SURF * H);
+  g.addColorStop(0, '#06101E');
+  g.addColorStop(1, '#0C1E32');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, SURF * H);
+
+  // Stars
+  ctx.fillStyle = 'rgba(255,255,255,0.75)';
+  for (let i = 0; i < 28; i++) {
+    ctx.beginPath();
+    ctx.arc(((i * 137.5) % 1) * W, ((i * 97.3) % SURF) * H, 1.2, 0, Math.PI*2);
+    ctx.fill();
+  }
+
+  // Moon
+  ctx.fillStyle = '#CCD5FF';
+  ctx.beginPath(); ctx.arc(W*0.82, H*0.05, 18, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = '#07101D';
+  ctx.beginPath(); ctx.arc(W*0.845, H*0.044, 15, 0, Math.PI*2); ctx.fill();
+
+  // Shallow
+  g = ctx.createLinearGradient(0, SURF*H, 0, SHALLOW_END*H);
+  g.addColorStop(0, '#0D3B5E'); g.addColorStop(1, '#092B46');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, SURF*H, W, (SHALLOW_END-SURF)*H);
+
+  // Mid
+  g = ctx.createLinearGradient(0, SHALLOW_END*H, 0, MID_END*H);
+  g.addColorStop(0, '#092B46'); g.addColorStop(1, '#061A2E');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, SHALLOW_END*H, W, (MID_END-SHALLOW_END)*H);
+
+  // Deep
+  g = ctx.createLinearGradient(0, MID_END*H, 0, DEEP_END*H);
+  g.addColorStop(0, '#061A2E'); g.addColorStop(1, '#020A16');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, MID_END*H, W, (DEEP_END-MID_END)*H);
+
+  // Sea floor
+  g = ctx.createLinearGradient(0, DEEP_END*H, 0, H);
+  g.addColorStop(0, '#180D08'); g.addColorStop(1, '#0D0604');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, DEEP_END*H, W, H);
+
+  // Zone lines (subtle)
+  ctx.setLineDash([6, 18]);
+  ctx.strokeStyle = 'rgba(255,255,255,0.05)';
+  ctx.lineWidth = 1;
+  [SHALLOW_END, MID_END].forEach(z => {
+    ctx.beginPath(); ctx.moveTo(0, z*H); ctx.lineTo(W, z*H); ctx.stroke();
+  });
+  ctx.setLineDash([]);
+
+  // Water-surface ripples
+  const rippleT = ts * 0.00008;
+  ctx.strokeStyle = 'rgba(80,160,240,0.25)';
+  ctx.lineWidth = 2;
+  for (let i = 0; i < 5; i++) {
+    const rx = ((i * 0.22 + rippleT) % 1) * W;
+    ctx.beginPath();
+    ctx.moveTo(rx, SURF * H);
+    ctx.bezierCurveTo(rx+18, SURF*H-3, rx+38, SURF*H+3, rx+56, SURF*H);
+    ctx.stroke();
+  }
+
+  // Bioluminescent drifting motes in deep
+  for (let i = 0; i < 18; i++) {
+    const mx = ((i * 137.5 + ts * 0.000035 * (1 + i%3)) % 1) * W;
+    const my = (MID_END + (i * 0.055) % (DEEP_END - MID_END)) * H;
+    const a  = 0.25 + 0.2 * Math.sin(ts * 0.0009 + i * 1.3);
+    ctx.fillStyle = `rgba(130,70,255,${a.toFixed(2)})`;
+    ctx.beginPath(); ctx.arc(mx, my, 2, 0, Math.PI*2); ctx.fill();
+  }
+}
+
+function drawBubbles() {
+  for (const b of bubbles) {
+    ctx.strokeStyle = `rgba(140,200,255,${b.alpha.toFixed(2)})`;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(b.x * W, b.y * H, b.r * W, 0, Math.PI * 2);
+    ctx.stroke();
+    // highlight
+    ctx.fillStyle = `rgba(200,230,255,${(b.alpha * 0.4).toFixed(2)})`;
+    ctx.beginPath();
+    ctx.arc(b.x * W - b.r * W * 0.3, b.y * H - b.r * W * 0.3, b.r * W * 0.35, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function drawFish(f) {
+  const x  = f.x * W;
+  const y  = f.y * H;
+  const sz = f.type.sz * W;
+  ctx.save();
+  ctx.translate(x, y);
+  if (f.dir < 0) ctx.scale(-1, 1);
+
+  ctx.shadowColor = f.type.glow;
+  ctx.shadowBlur  = sz * 0.9;
+
+  // Body ellipse
+  ctx.fillStyle = f.type.col;
+  ctx.beginPath();
+  ctx.ellipse(0, 0, sz, sz * 0.32, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Belly highlight
+  ctx.fillStyle = 'rgba(255,255,255,0.22)';
+  ctx.beginPath();
+  ctx.ellipse(sz * 0.1, -sz * 0.05, sz * 0.5, sz * 0.14, -0.2, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Tail
+  const wag = Math.sin(f.tail) * sz * 0.28;
+  ctx.fillStyle = f.type.col;
+  ctx.beginPath();
+  ctx.moveTo(-sz * 0.68, wag);
+  ctx.lineTo(-sz * 1.15, -sz * 0.32 + wag);
+  ctx.lineTo(-sz * 1.15,  sz * 0.32 + wag);
+  ctx.closePath();
+  ctx.fill();
+
+  // Dorsal fin
+  ctx.beginPath();
+  ctx.moveTo(-sz * 0.1, -sz * 0.32);
+  ctx.quadraticCurveTo(sz * 0.2, -sz * 0.65, sz * 0.4, -sz * 0.32);
+  ctx.closePath();
+  ctx.fill();
+
+  // Eye
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = '#FFF';
+  ctx.beginPath(); ctx.arc(sz * 0.55, -sz * 0.06, sz * 0.10, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = '#111';
+  ctx.beginPath(); ctx.arc(sz * 0.57, -sz * 0.06, sz * 0.06, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = '#FFF';
+  ctx.beginPath(); ctx.arc(sz * 0.595, -sz * 0.085, sz * 0.025, 0, Math.PI*2); ctx.fill();
+
+  // Anglerfish lure
+  if (f.type.name === 'Anglerfish') {
+    ctx.shadowColor = f.type.glow;
+    ctx.shadowBlur  = 12;
+    ctx.strokeStyle = '#EEC0FF';
+    ctx.lineWidth   = 2;
+    ctx.beginPath();
+    ctx.moveTo(sz * 0.55, -sz * 0.32);
+    ctx.bezierCurveTo(sz * 1.1, -sz * 0.95, sz * 0.85, -sz * 1.05, sz * 0.75, -sz * 1.0);
+    ctx.stroke();
+    ctx.fillStyle = f.type.glow;
+    ctx.beginPath(); ctx.arc(sz * 0.75, -sz * 1.0, sz * 0.11, 0, Math.PI*2); ctx.fill();
+    ctx.shadowBlur = 0;
+  }
+
+  ctx.restore();
+}
+
+function drawBoatAndLine() {
+  const bx = rodX * W;
+  const by = SURF  * H;
+
+  // Hull
+  ctx.fillStyle = '#7A3B10';
+  ctx.beginPath();
+  ctx.moveTo(bx-38, by-2); ctx.lineTo(bx+38, by-2);
+  ctx.lineTo(bx+26, by+14); ctx.lineTo(bx-26, by+14);
+  ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = '#4A2008'; ctx.lineWidth = 2; ctx.stroke();
+
+  // Cabin
+  ctx.fillStyle = '#C8611A';
+  ctx.beginPath();
+  ctx.roundRect(bx-14, by-20, 28, 18, 3);
+  ctx.fill();
+
+  // Flag
+  ctx.fillStyle = '#FF6060';
+  ctx.beginPath();
+  ctx.moveTo(bx+14, by-20); ctx.lineTo(bx+28, by-26); ctx.lineTo(bx+14, by-32);
+  ctx.closePath(); ctx.fill();
+
+  // Rod
+  ctx.shadowColor = '#FFD080';
+  ctx.shadowBlur  = 6;
+  ctx.strokeStyle = '#D4A840';
+  ctx.lineWidth   = 3;
+  ctx.beginPath();
+  ctx.moveTo(bx-8, by-16);
+  ctx.quadraticCurveTo(bx-2, by-52, bx+6, by-62);
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+
+  // Fishing line from rod tip to hook
+  const lx = bx + 6, ly = by - 62;
+  ctx.strokeStyle = 'rgba(200,210,220,0.7)';
+  ctx.lineWidth   = 1;
+  ctx.beginPath();
+  ctx.moveTo(lx, ly);
+  ctx.lineTo(hook.x * W, hook.y * H);
+  ctx.stroke();
+
+  // Hook
+  const hx = hook.x * W + Math.sin(hook.wobble) * 4 * (W / 800);
+  const hy = hook.y * H;
+  ctx.strokeStyle = '#AAAAAA';
+  ctx.lineWidth   = 2;
+  ctx.beginPath();
+  ctx.moveTo(hx, hy - 4);
+  ctx.lineTo(hx, hy + 9);
+  ctx.arc(hx + 4, hy + 9, 4, Math.PI, 0, true);
+  ctx.lineTo(hx + 10, hy + 4);
+  ctx.stroke();
+}
+
+function drawHUD() {
+  const sz = W / 800;
+  ctx.textAlign = 'left';
+
+  // Score
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  ctx.roundRect(10*sz, 10*sz, 145*sz, 52*sz, 8*sz);
+  ctx.fill();
+  ctx.fillStyle = '#FFD700';
+  ctx.font = `bold ${Math.round(13*sz)}px 'Courier New', monospace`;
+  ctx.fillText('SCORE', 20*sz, 28*sz);
+  ctx.fillStyle = '#FFFFFF';
+  ctx.font = `bold ${Math.round(22*sz)}px 'Courier New', monospace`;
+  ctx.fillText(score, 20*sz, 52*sz);
+
+  // Timer (centre)
+  const urgCol = timeLeft < 15 ? '#FF4444' : '#44FF88';
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  ctx.roundRect(W/2 - 52*sz, 10*sz, 104*sz, 52*sz, 8*sz);
+  ctx.fill();
+  ctx.fillStyle = urgCol;
+  ctx.font = `bold ${Math.round(12*sz)}px 'Courier New', monospace`;
+  ctx.textAlign = 'center';
+  ctx.fillText('TIME', W/2, 28*sz);
+  ctx.font = `bold ${Math.round(24*sz)}px 'Courier New', monospace`;
+  ctx.fillText(Math.ceil(timeLeft), W/2, 52*sz);
+
+  // Caught (right)
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  ctx.roundRect(W - 155*sz, 10*sz, 145*sz, 52*sz, 8*sz);
+  ctx.fill();
+  ctx.fillStyle = '#88CCFF';
+  ctx.font = `bold ${Math.round(12*sz)}px 'Courier New', monospace`;
+  ctx.textAlign = 'right';
+  ctx.fillText('CAUGHT', W - 14*sz, 28*sz);
+  ctx.fillStyle = '#FFFFFF';
+  ctx.font = `bold ${Math.round(20*sz)}px 'Courier New', monospace`;
+  ctx.fillText(caught + ' fish', W - 14*sz, 52*sz);
+
+  // Depth zone labels
+  ctx.fillStyle = 'rgba(255,255,255,0.28)';
+  ctx.font = `${Math.round(11*sz)}px 'Courier New', monospace`;
+  ctx.textAlign = 'right';
+  ctx.fillText('10-25 pts ▸', W - 8*sz, (SURF + (SHALLOW_END - SURF) * 0.5) * H);
+  ctx.fillText('50 pts ▸',    W - 8*sz, (SHALLOW_END + (MID_END - SHALLOW_END) * 0.5) * H);
+  ctx.fillText('90-160 pts ▸',W - 8*sz, (MID_END + (DEEP_END - MID_END) * 0.5) * H);
+
+  // Bottom hint
+  ctx.fillStyle = 'rgba(255,255,255,0.35)';
+  ctx.font = `${Math.round(11*sz)}px 'Courier New', monospace`;
+  ctx.textAlign = 'center';
+  ctx.fillText('MOUSE / ARROWS to aim  •  CLICK / SPACE to cast', W/2, H - 8*sz);
+}
+
+function drawParticles() {
+  for (const p of particles) {
+    ctx.globalAlpha = p.life;
+    ctx.fillStyle   = p.col;
+    ctx.shadowColor = p.col;
+    ctx.shadowBlur  = 8;
+    ctx.beginPath();
+    ctx.arc(p.x * W, p.y * H, p.r * W, 0, Math.PI*2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  ctx.shadowBlur  = 0;
+}
+
+function drawScorePops() {
+  for (const sp of scorePops) {
+    ctx.globalAlpha = Math.min(sp.life, 1);
+    ctx.shadowColor = '#FF8800';
+    ctx.shadowBlur  = 12;
+    ctx.fillStyle   = '#FFD700';
+    ctx.font        = `bold ${Math.round(28 * W/800)}px 'Courier New', monospace`;
+    ctx.textAlign   = 'center';
+    ctx.fillText('+' + sp.pts, sp.x * W, sp.y * H);
+  }
+  ctx.globalAlpha = 1;
+  ctx.shadowBlur  = 0;
+}
+
+// ─── Screen draws ─────────────────────────────────────────────────────────────
+function drawTitle(ts) {
+  drawOcean(ts);
+  drawBubbles();
+  for (const f of fishes) drawFish(f);
+
+  const sz = W / 800;
+  // Overlay panel
+  ctx.fillStyle = 'rgba(2,8,22,0.86)';
+  ctx.roundRect(W*0.12, H*0.17, W*0.76, H*0.60, 18*sz);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(80,160,255,0.45)';
+  ctx.lineWidth = 2;
+  ctx.roundRect(W*0.12, H*0.17, W*0.76, H*0.60, 18*sz);
+  ctx.stroke();
+
+  // Title
+  ctx.textAlign = 'center';
+  ctx.shadowColor = '#3388FF';
+  ctx.shadowBlur  = 28;
+  ctx.fillStyle   = '#88CCFF';
+  ctx.font = `bold ${Math.round(52*sz)}px 'Courier New', monospace`;
+  ctx.fillText('DEEP GLOW', W/2, H*0.36);
+  ctx.fillStyle   = '#FFD700';
+  ctx.shadowColor = '#FF8800';
+  ctx.font = `bold ${Math.round(38*sz)}px 'Courier New', monospace`;
+  ctx.fillText('FISHING', W/2, H*0.48);
+  ctx.shadowBlur = 0;
+
+  // Tagline
+  ctx.fillStyle = 'rgba(180,210,255,0.75)';
+  ctx.font = `${Math.round(13*sz)}px 'Courier New', monospace`;
+  ctx.fillText('Cast your line into the bioluminescent deep!', W/2, H*0.565);
+
+  // Points legend
+  ctx.fillStyle = 'rgba(200,220,255,0.55)';
+  ctx.font = `${Math.round(11*sz)}px 'Courier New', monospace`;
+  ctx.fillText('Goldfish 10  •  Trout 25  •  Tuna 50  •  Anglerfish 90  •  Kraken 160', W/2, H*0.625);
+
+  // Controls
+  ctx.fillStyle = 'rgba(200,220,255,0.55)';
+  ctx.font = `${Math.round(11*sz)}px 'Courier New', monospace`;
+  ctx.fillText('AIM: Mouse or Arrow Keys   CAST: Click or Space', W/2, H*0.665);
+
+  // Blink prompt
+  if (blinkOn) {
+    ctx.fillStyle = '#FFFFFF';
+    ctx.shadowColor = '#88CCFF';
+    ctx.shadowBlur  = 14;
+    ctx.font = `bold ${Math.round(20*sz)}px 'Courier New', monospace`;
+    ctx.fillText('▶  CLICK or PRESS ANY KEY TO START  ◀', W/2, H*0.725);
+    ctx.shadowBlur = 0;
+  }
+
+  if (highScore > 0) {
+    ctx.fillStyle = '#44FF88';
+    ctx.font = `${Math.round(12*sz)}px 'Courier New', monospace`;
+    ctx.fillText('BEST SCORE: ' + highScore, W/2, H*0.76);
+  }
+}
+
+function drawPlaying(ts) {
+  drawOcean(ts);
+  drawBubbles();
+  for (const f of fishes) { if (!f.caught) drawFish(f); }
+  drawBoatAndLine();
+  if (hook.cargo) drawFish(hook.cargo);
+  drawParticles();
+  drawScorePops();
+  drawHUD();
+}
+
+function drawGameOver(ts) {
+  drawOcean(ts);
+  drawBubbles();
+
+  const sz = W / 800;
+  ctx.fillStyle = 'rgba(2,5,18,0.90)';
+  ctx.roundRect(W*0.14, H*0.12, W*0.72, H*0.68, 18*sz);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,80,120,0.55)';
+  ctx.lineWidth = 2;
+  ctx.roundRect(W*0.14, H*0.12, W*0.72, H*0.68, 18*sz);
+  ctx.stroke();
+
+  ctx.textAlign  = 'center';
+  ctx.shadowColor = '#FF3366';
+  ctx.shadowBlur  = 22;
+  ctx.fillStyle   = '#FF8899';
+  ctx.font = `bold ${Math.round(40*sz)}px 'Courier New', monospace`;
+  ctx.fillText('BACK TO SHORE!', W/2, H*0.295);
+  ctx.shadowBlur = 0;
+
+  ctx.fillStyle = 'rgba(160,200,255,0.85)';
+  ctx.font = `${Math.round(16*sz)}px 'Courier New', monospace`;
+  ctx.fillText('Fish Caught: ' + caught, W/2, H*0.41);
+
+  ctx.shadowColor = '#FF8800';
+  ctx.shadowBlur  = 14;
+  ctx.fillStyle   = '#FFD700';
+  ctx.font = `bold ${Math.round(32*sz)}px 'Courier New', monospace`;
+  ctx.fillText('SCORE: ' + score, W/2, H*0.52);
+  ctx.shadowBlur = 0;
+
+  ctx.fillStyle = '#44FF88';
+  ctx.font = `${Math.round(16*sz)}px 'Courier New', monospace`;
+  ctx.fillText('BEST: ' + highScore, W/2, H*0.605);
+
+  // Play Again button
+  const bw = 200*sz, bh = 46*sz;
+  const bx = W/2 - bw/2, by = H*0.685;
+  ctx.fillStyle = '#0D3D22';
+  ctx.roundRect(bx, by, bw, bh, 10*sz);
+  ctx.fill();
+  ctx.strokeStyle = '#44FF88';
+  ctx.lineWidth = 2;
+  ctx.roundRect(bx, by, bw, bh, 10*sz);
+  ctx.stroke();
+  ctx.fillStyle = '#44FF88';
+  ctx.font = `bold ${Math.round(20*sz)}px 'Courier New', monospace`;
+  ctx.fillText('PLAY AGAIN', W/2, by + 31*sz);
+}
+
+// ─── Game loop ────────────────────────────────────────────────────────────────
+function loop(ts) {
+  const dt = Math.min(ts - lastTime, 50);
+  lastTime = ts;
+
+  ctx.clearRect(0, 0, W, H);
+  update(dt);
+
+  if (state === S.TITLE)    drawTitle(ts);
+  if (state === S.PLAYING)  drawPlaying(ts);
+  if (state === S.GAMEOVER) drawGameOver(ts);
+
+  requestAnimationFrame(loop);
+}
+
+requestAnimationFrame(ts => { lastTime = ts; requestAnimationFrame(loop); });
+</script>
+</body>
+</html>
