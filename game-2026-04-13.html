@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Neon Recall</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #04030e;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+    overflow: hidden;
+  }
+  canvas { display: block; touch-action: none; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+'use strict';
+// Genre: Memory game | Date: 2026-04-13
+// =============================================================================
+//  NEON RECALL  –  A neon-themed memory / pair-matching game
+//  Flip cards to find matching symbol pairs. Complete all pairs to win.
+//  Fewer flips = higher score. Each level adds more pairs.
+//  Controls: Click / Tap cards to flip them.
+// =============================================================================
+
+const canvas = document.getElementById('c');
+const ctx    = canvas.getContext('2d');
+
+// ── Responsive sizing ─────────────────────────────────────────────────────────
+const W = 540, H = 620;
+let scale = 1;
+function resize() {
+  scale = Math.min(window.innerWidth / W, window.innerHeight / H);
+  canvas.width  = W;
+  canvas.height = H;
+  canvas.style.width  = (W * scale) + 'px';
+  canvas.style.height = (H * scale) + 'px';
+}
+resize();
+window.addEventListener('resize', resize);
+
+// ── roundRect polyfill ────────────────────────────────────────────────────────
+if (!CanvasRenderingContext2D.prototype.roundRect) {
+  CanvasRenderingContext2D.prototype.roundRect = function(x,y,w,h,r) {
+    r = Math.min(r, w/2, h/2);
+    this.beginPath();
+    this.moveTo(x+r,y); this.arcTo(x+w,y,x+w,y+h,r);
+    this.arcTo(x+w,y+h,x,y+h,r); this.arcTo(x,y+h,x,y,r);
+    this.arcTo(x,y,x+w,y,r); this.closePath();
+  };
+}
+
+// ── Symbols & colours ─────────────────────────────────────────────────────────
+const SYMBOLS = [
+  { glyph: '★', color: '#ffd700' },
+  { glyph: '♦', color: '#00e5ff' },
+  { glyph: '♥', color: '#ff3fa4' },
+  { glyph: '▲', color: '#aaff00' },
+  { glyph: '●', color: '#c084fc' },
+  { glyph: '✦', color: '#ff9f43' },
+  { glyph: '⬟', color: '#00ff88' },
+  { glyph: '♣', color: '#ff6b6b' },
+  { glyph: '⬡', color: '#54a0ff' },
+  { glyph: '✿', color: '#ff79c6' },
+];
+
+// ── Game state ────────────────────────────────────────────────────────────────
+const S = { TITLE: 0, PLAYING: 1, WIN: 2, GAMEOVER: 3 };
+let state = S.TITLE;
+
+let level, score, hiScore, flips, pairsFound, totalPairs;
+let cards, revealed, locked;
+let flipTimer, flipA, flipB;
+let particles;
+let wonAnim;
+
+hiScore = 0;
+
+// ── Layout helpers ────────────────────────────────────────────────────────────
+const HUD_H  = 56;
+const PAD    = 18;
+
+function gridLayout(numCards) {
+  // Find best cols/rows for numCards that fits the canvas
+  const cols = numCards <= 8 ? 4 : numCards <= 12 ? 4 : numCards <= 16 ? 4 : 5;
+  const rows = Math.ceil(numCards / cols);
+  const cw   = Math.floor((W - PAD * 2 - (cols - 1) * 8) / cols);
+  const ch   = Math.floor((H - HUD_H - PAD * 2 - (rows - 1) * 8) / rows);
+  const size = Math.min(cw, ch, 100);
+  const gw   = cols * size + (cols - 1) * 8;
+  const gh   = rows * size + (rows - 1) * 8;
+  const ox   = (W - gw) / 2;
+  const oy   = HUD_H + (H - HUD_H - gh) / 2;
+  return { cols, rows, size, ox, oy, gap: 8 };
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+function startGame() {
+  level      = 1;
+  score      = 0;
+  flips      = 0;
+  particles  = [];
+  setupLevel();
+  state = S.PLAYING;
+}
+
+function setupLevel() {
+  const numPairs = Math.min(3 + level * 2, 10); // 5,7,9,10,10…
+  totalPairs  = numPairs;
+  pairsFound  = 0;
+  locked      = false;
+  flipTimer   = 0;
+  flipA       = flipB = -1;
+  wonAnim     = 0;
+
+  // Shuffle symbols
+  const pool = SYMBOLS.slice(0, numPairs);
+  const deck = [...pool, ...pool]
+    .map((s, i) => ({ ...s, id: Math.floor(i / 2) }))
+    .sort(() => Math.random() - 0.5);
+
+  const layout = gridLayout(deck.length);
+  cards = deck.map((s, i) => {
+    const col = i % layout.cols;
+    const row = Math.floor(i / layout.cols);
+    return {
+      ...s,
+      x: layout.ox + col * (layout.size + layout.gap),
+      y: layout.oy + row * (layout.size + layout.gap),
+      size: layout.size,
+      flip: 0,       // 0=face-down, 1=face-up (animated 0→1)
+      matched: false,
+      flipDir: 0,    // -1 closing, 1 opening
+      reveal: false, // target state
+    };
+  });
+  revealed = new Set();
+}
+
+// ── Particles ─────────────────────────────────────────────────────────────────
+function burst(x, y, color, n = 10) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const s = 1.5 + Math.random() * 4;
+    particles.push({ x, y, vx: Math.cos(a)*s, vy: Math.sin(a)*s,
+      color, life: 1, decay: 0.025 + Math.random()*0.03, r: 2+Math.random()*4 });
+  }
+}
+
+// ── Update ────────────────────────────────────────────────────────────────────
+function handleClick(mx, my) {
+  if (state === S.TITLE || state === S.WIN || state === S.GAMEOVER) {
+    if (state === S.WIN) { level++; setupLevel(); state = S.PLAYING; }
+    else startGame();
+    return;
+  }
+  if (locked) return;
+
+  for (let i = 0; i < cards.length; i++) {
+    const c = cards[i];
+    if (c.matched) continue;
+    if (mx >= c.x && mx <= c.x + c.size && my >= c.y && my <= c.y + c.size) {
+      if (revealed.has(i)) return; // already flipped
+      if (revealed.size >= 2) return;
+
+      c.reveal  = true;
+      c.flipDir = 1;
+      revealed.add(i);
+      flips++;
+
+      if (revealed.size === 2) {
+        locked = true;
+        flipTimer = 60; // wait before checking
+      }
+      break;
+    }
+  }
+}
+
+let lastTs = 0;
+function update(ts) {
+  const dt = Math.min(ts - lastTs, 80);
+  lastTs   = ts;
+
+  if (state !== S.PLAYING) return;
+
+  // Animate card flips
+  for (const c of cards) {
+    if (c.flipDir === 1 && c.flip < 1) {
+      c.flip = Math.min(1, c.flip + 0.12);
+      if (c.flip === 1) c.flipDir = 0;
+    } else if (c.flipDir === -1 && c.flip > 0) {
+      c.flip = Math.max(0, c.flip - 0.12);
+      if (c.flip === 0) { c.flipDir = 0; c.reveal = false; }
+    }
+  }
+
+  // Check pair after delay
+  if (locked && flipTimer > 0) {
+    flipTimer--;
+    if (flipTimer === 0) {
+      const [a, b] = [...revealed];
+      if (cards[a].id === cards[b].id) {
+        // Match!
+        cards[a].matched = cards[b].matched = true;
+        pairsFound++;
+        const bonus = Math.max(10, 50 - flips * 2);
+        score += bonus * level;
+        burst(cards[a].x + cards[a].size/2, cards[a].y + cards[a].size/2, cards[a].color, 12);
+        burst(cards[b].x + cards[b].size/2, cards[b].y + cards[b].size/2, cards[b].color, 12);
+        if (pairsFound === totalPairs) {
+          score += 200 * level;
+          if (score > hiScore) hiScore = score;
+          wonAnim   = 0;
+          state     = S.WIN;
+        }
+      } else {
+        // No match — flip back
+        cards[a].flipDir = -1;
+        cards[b].flipDir = -1;
+      }
+      revealed.clear();
+      locked = false;
+    }
+  }
+
+  // Particles
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx; p.y += p.vy; p.vx *= 0.94; p.vy *= 0.94;
+    p.life -= p.decay;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+
+  if (state === S.WIN) wonAnim += dt / 1000;
+}
+
+// ── Draw ──────────────────────────────────────────────────────────────────────
+function drawBg() {
+  ctx.fillStyle = '#04030e';
+  ctx.fillRect(0, 0, W, H);
+  // Subtle dot grid
+  ctx.fillStyle = 'rgba(100,60,200,0.08)';
+  for (let x = 20; x < W; x += 30)
+    for (let y = 20; y < H; y += 30) {
+      ctx.beginPath(); ctx.arc(x, y, 1, 0, Math.PI*2); ctx.fill();
+    }
+}
+
+function drawCard(c, i) {
+  const cx = c.x + c.size / 2;
+  const cy = c.y + c.size / 2;
+  // flip is 0→1; at 0.5 we switch face
+  const scaleX = Math.abs(Math.cos(c.flip * Math.PI));
+  const showFace = c.flip >= 0.5;
+
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.scale(scaleX, 1);
+  ctx.translate(-c.size/2, -c.size/2);
+
+  if (c.matched) {
+    // Matched: glowing face
+    ctx.shadowColor = c.color;
+    ctx.shadowBlur  = 18;
+    ctx.fillStyle   = `color-mix(in srgb, ${c.color} 20%, #04030e)`;
+    ctx.roundRect(0, 0, c.size, c.size, 10); ctx.fill();
+    ctx.strokeStyle = c.color;
+    ctx.lineWidth   = 2;
+    ctx.roundRect(0, 0, c.size, c.size, 10); ctx.stroke();
+    ctx.shadowBlur  = 0;
+    ctx.fillStyle   = c.color;
+    ctx.font        = `bold ${c.size * 0.46}px sans-serif`;
+    ctx.textAlign   = 'center';
+    ctx.textBaseline= 'middle';
+    ctx.fillText(c.glyph, c.size/2, c.size/2);
+  } else if (showFace) {
+    // Face up
+    ctx.shadowColor = c.color;
+    ctx.shadowBlur  = 12;
+    ctx.fillStyle   = '#0d0828';
+    ctx.roundRect(0, 0, c.size, c.size, 10); ctx.fill();
+    ctx.strokeStyle = c.color;
+    ctx.lineWidth   = 2;
+    ctx.roundRect(0, 0, c.size, c.size, 10); ctx.stroke();
+    ctx.shadowBlur  = 0;
+    ctx.fillStyle   = c.color;
+    ctx.font        = `bold ${c.size * 0.46}px sans-serif`;
+    ctx.textAlign   = 'center';
+    ctx.textBaseline= 'middle';
+    ctx.fillText(c.glyph, c.size/2, c.size/2);
+  } else {
+    // Face down
+    ctx.fillStyle = '#12092e';
+    ctx.roundRect(0, 0, c.size, c.size, 10); ctx.fill();
+    ctx.strokeStyle = 'rgba(150,80,255,0.4)';
+    ctx.lineWidth   = 1.5;
+    ctx.roundRect(0, 0, c.size, c.size, 10); ctx.stroke();
+    // Back pattern: small diamond grid
+    ctx.strokeStyle = 'rgba(120,60,220,0.25)';
+    ctx.lineWidth   = 1;
+    const step = c.size / 4;
+    for (let r = 0; r <= 4; r++) {
+      ctx.beginPath();
+      ctx.moveTo(0, r * step);  ctx.lineTo(c.size, r * step); ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(r * step, 0);  ctx.lineTo(r * step, c.size); ctx.stroke();
+    }
+    // Centre logo
+    ctx.fillStyle    = 'rgba(180,120,255,0.3)';
+    ctx.font         = `${c.size * 0.3}px sans-serif`;
+    ctx.textAlign    = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('?', c.size/2, c.size/2);
+  }
+
+  ctx.restore();
+}
+
+function drawHUD() {
+  ctx.fillStyle = '#08061a';
+  ctx.fillRect(0, 0, W, HUD_H);
+  ctx.fillStyle = 'rgba(140,80,255,0.18)';
+  ctx.fillRect(0, HUD_H - 1, W, 1);
+
+  ctx.textBaseline = 'middle';
+  ctx.font         = 'bold 15px Courier New';
+
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'left';
+  ctx.fillText('SCORE  ' + String(score).padStart(6,'0'), 14, HUD_H/2 - 8);
+
+  ctx.fillStyle = 'rgba(180,140,255,0.6)';
+  ctx.font      = '11px Courier New';
+  ctx.fillText('BEST  ' + String(hiScore).padStart(6,'0'), 14, HUD_H/2 + 10);
+
+  ctx.font      = 'bold 15px Courier New';
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'center';
+  ctx.fillText('LEVEL ' + level, W/2, HUD_H/2 - 8);
+
+  // Pairs progress
+  ctx.font      = '11px Courier New';
+  ctx.fillStyle = 'rgba(180,220,255,0.6)';
+  ctx.fillText(pairsFound + ' / ' + totalPairs + ' pairs', W/2, HUD_H/2 + 10);
+
+  ctx.textAlign = 'right';
+  ctx.font      = 'bold 15px Courier New';
+  ctx.fillStyle = '#fff';
+  ctx.fillText('FLIPS  ' + flips, W - 14, HUD_H/2 - 8);
+
+  // Efficiency hint
+  const perfect = totalPairs * 2;
+  const eff = flips === 0 ? '–' : Math.max(0, Math.round((perfect / Math.max(flips, perfect)) * 100)) + '%';
+  ctx.font      = '11px Courier New';
+  ctx.fillStyle = 'rgba(180,220,255,0.6)';
+  ctx.fillText('EFF ' + eff, W - 14, HUD_H/2 + 10);
+}
+
+function drawParticles() {
+  for (const p of particles) {
+    ctx.save();
+    ctx.globalAlpha = p.life;
+    ctx.fillStyle   = p.color;
+    ctx.shadowColor = p.color; ctx.shadowBlur = 6;
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI*2); ctx.fill();
+    ctx.restore();
+  }
+}
+
+function drawTitle() {
+  drawBg();
+  ctx.save();
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+
+  ctx.shadowColor = '#c084fc'; ctx.shadowBlur = 40;
+  ctx.fillStyle   = '#c084fc';
+  ctx.font        = 'bold 60px Courier New';
+  ctx.fillText('NEON', W/2, H/2 - 75);
+
+  ctx.shadowColor = '#00e5ff'; ctx.shadowBlur = 40;
+  ctx.fillStyle   = '#00e5ff';
+  ctx.fillText('RECALL', W/2, H/2 - 5);
+
+  ctx.shadowBlur = 0;
+  ctx.fillStyle  = 'rgba(255,255,255,0.55)';
+  ctx.font       = '13px Courier New';
+  ctx.fillText('Flip cards to find matching pairs', W/2, H/2 + 54);
+  ctx.fillText('Fewer flips = bigger score bonus', W/2, H/2 + 74);
+
+  const a = 0.4 + 0.6 * Math.sin(Date.now() / 520);
+  ctx.save(); ctx.globalAlpha = a;
+  ctx.fillStyle = '#fff'; ctx.font = 'bold 16px Courier New';
+  ctx.fillText('Click / Tap to start', W/2, H/2 + 118);
+  ctx.restore();
+
+  if (hiScore > 0) {
+    ctx.fillStyle = 'rgba(255,215,0,0.75)'; ctx.font = '12px Courier New';
+    ctx.fillText('BEST: ' + hiScore, W/2, H/2 + 150);
+  }
+  ctx.restore();
+}
+
+function drawWin() {
+  // Still show the matched board behind
+  drawBg();
+  for (let i = 0; i < cards.length; i++) drawCard(cards[i], i);
+  drawParticles();
+  drawHUD();
+
+  ctx.fillStyle = 'rgba(4,3,14,0.78)';
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.save();
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.shadowColor = '#ffd700'; ctx.shadowBlur = 30;
+  ctx.fillStyle   = '#ffd700';
+  ctx.font        = 'bold 48px Courier New';
+  ctx.fillText('CLEARED!', W/2, H/2 - 70);
+
+  ctx.shadowBlur  = 0;
+  ctx.fillStyle   = '#fff'; ctx.font = '20px Courier New';
+  ctx.fillText('Score: ' + score, W/2, H/2 - 10);
+  ctx.fillStyle   = 'rgba(200,180,255,0.7)'; ctx.font = '13px Courier New';
+  ctx.fillText('Flips used: ' + flips, W/2, H/2 + 18);
+
+  // Next level button
+  const by = H/2 + 90;
+  ctx.shadowColor = '#00e5ff'; ctx.shadowBlur = 14;
+  ctx.fillStyle   = '#00e5ff';
+  ctx.roundRect(W/2 - 110, by - 26, 220, 52, 10); ctx.fill();
+  ctx.shadowBlur  = 0;
+  ctx.fillStyle   = '#000'; ctx.font = 'bold 17px Courier New';
+  ctx.fillText('NEXT LEVEL', W/2, by);
+  ctx.restore();
+}
+
+// ── Main loop ─────────────────────────────────────────────────────────────────
+function loop(ts) {
+  update(ts);
+
+  if (state === S.TITLE) { drawTitle(); }
+  else if (state === S.WIN) { drawWin(); drawParticles(); }
+  else {
+    drawBg();
+    for (let i = 0; i < cards.length; i++) drawCard(cards[i], i);
+    drawParticles();
+    drawHUD();
+  }
+
+  requestAnimationFrame(loop);
+}
+
+// ── Input ─────────────────────────────────────────────────────────────────────
+canvas.addEventListener('click', e => {
+  const r  = canvas.getBoundingClientRect();
+  const mx = (e.clientX - r.left) / scale;
+  const my = (e.clientY - r.top)  / scale;
+  handleClick(mx, my);
+});
+
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  const r  = canvas.getBoundingClientRect();
+  const mx = (e.touches[0].clientX - r.left) / scale;
+  const my = (e.touches[0].clientY - r.top)  / scale;
+  handleClick(mx, my);
+}, { passive: false });
+
+document.addEventListener('keydown', e => {
+  if (state === S.TITLE) startGame();
+  else if (state === S.WIN) { level++; setupLevel(); state = S.PLAYING; }
+});
+
+// ── Boot ──────────────────────────────────────────────────────────────────────
+cards = []; particles = [];
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

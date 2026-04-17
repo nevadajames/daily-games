@@ -1,0 +1,591 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Candy Cascade</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #1a0a2e;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 100vh;
+    overflow: hidden;
+    font-family: 'Segoe UI', Arial, sans-serif;
+  }
+  canvas {
+    display: block;
+    cursor: none;
+  }
+</style>
+</head>
+<body>
+<canvas id="gameCanvas"></canvas>
+<script>
+// Genre: Catching/collecting | Date: 2026-04-16
+
+// ─────────────────── roundRect polyfill ───────────────────
+if (!CanvasRenderingContext2D.prototype.roundRect) {
+  CanvasRenderingContext2D.prototype.roundRect = function(x, y, w, h, r) {
+    if (w < 2 * r) r = w / 2;
+    if (h < 2 * r) r = h / 2;
+    this.beginPath();
+    this.moveTo(x + r, y);
+    this.arcTo(x + w, y,     x + w, y + h, r);
+    this.arcTo(x + w, y + h, x,     y + h, r);
+    this.arcTo(x,     y + h, x,     y,     r);
+    this.arcTo(x,     y,     x + w, y,     r);
+    this.closePath();
+    return this;
+  };
+}
+
+// ─────────────────── Canvas setup ───────────────────
+const canvas = document.getElementById('gameCanvas');
+const ctx    = canvas.getContext('2d');
+
+const BASE_W = 480;
+const BASE_H = 720;
+let scale = 1;
+
+function resize() {
+  const ww = window.innerWidth;
+  const wh = window.innerHeight;
+  scale = Math.min(ww / BASE_W, wh / BASE_H);
+  canvas.width  = BASE_W * scale;
+  canvas.height = BASE_H * scale;
+  ctx.setTransform(scale, 0, 0, scale, 0, 0);
+}
+resize();
+window.addEventListener('resize', resize);
+
+// ─────────────────── Constants ───────────────────
+const CANDY_TYPES = [
+  { label: '🍭', color: '#ff6bca', pts: 10, r: 18, isBomb: false },
+  { label: '🍬', color: '#fddc3e', pts: 15, r: 16, isBomb: false },
+  { label: '🍩', color: '#ff9b54', pts: 20, r: 20, isBomb: false },
+  { label: '🍦', color: '#a8f0c6', pts: 25, r: 17, isBomb: false },
+  { label: '🍡', color: '#c8a2f8', pts: 30, r: 16, isBomb: false },
+  { label: '💣', color: '#555',    pts: 0,  r: 18, isBomb: true  },
+];
+
+const BOWL_W        = 80;
+const BOWL_H        = 32;
+const BOWL_Y_OFFSET = 60;
+const BOWL_SPEED    = 5;
+const MAX_LIVES     = 3;
+const PTS_PER_LEVEL = 500;
+
+// ─────────────────── State ───────────────────
+let STATE = 'title'; // 'title' | 'play' | 'over'
+
+let score, hiScore, lives, level, items, bowl;
+let spawnTimer, spawnInterval;
+let blinkTimer = 0;
+let blinkOn    = true;
+let particles  = [];
+let keys       = {};
+let mouseX     = BASE_W / 2;
+let touchX     = null;
+
+function initGame() {
+  score         = 0;
+  lives         = MAX_LIVES;
+  level         = 1;
+  items         = [];
+  particles     = [];
+  spawnTimer    = 0;
+  spawnInterval = 90;
+  bowl = { x: BASE_W / 2, y: BASE_H - BOWL_Y_OFFSET, vx: 0 };
+}
+
+// ─────────────────── Particles ───────────────────
+function spawnParticles(x, y, color, count) {
+  for (let i = 0; i < count; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const speed = 2 + Math.random() * 4;
+    particles.push({
+      x, y,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed,
+      r:  3 + Math.random() * 4,
+      color,
+      life: 40,
+      maxLife: 40,
+    });
+  }
+}
+
+function updateParticles() {
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x  += p.vx;
+    p.y  += p.vy;
+    p.vy += 0.15;
+    p.life--;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+}
+
+function drawParticles() {
+  particles.forEach(p => {
+    ctx.globalAlpha = p.life / p.maxLife;
+    ctx.fillStyle   = p.color;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+    ctx.fill();
+  });
+  ctx.globalAlpha = 1;
+}
+
+// ─────────────────── Background ───────────────────
+const BG_STARS = Array.from({ length: 60 }, () => ({
+  x:  Math.random() * BASE_W,
+  y:  Math.random() * BASE_H,
+  r:  0.5 + Math.random() * 1.5,
+  a:  Math.random(),
+  da: 0.005 + Math.random() * 0.01,
+}));
+
+function drawBackground() {
+  // Gradient sky
+  const grad = ctx.createLinearGradient(0, 0, 0, BASE_H);
+  grad.addColorStop(0, '#1a0a2e');
+  grad.addColorStop(1, '#3d1a5e');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, BASE_W, BASE_H);
+
+  // Twinkling stars
+  BG_STARS.forEach(s => {
+    s.a += s.da;
+    if (s.a > 1 || s.a < 0) s.da *= -1;
+    ctx.globalAlpha = s.a * 0.7;
+    ctx.fillStyle   = '#fff';
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+    ctx.fill();
+  });
+  ctx.globalAlpha = 1;
+}
+
+// ─────────────────── Falling items ───────────────────
+function spawnItem() {
+  const r    = Math.random();
+  let cumulative = 0;
+  const weights = [0.22, 0.22, 0.18, 0.15, 0.1, 0.13]; // last = bomb
+  let type = CANDY_TYPES[0];
+  for (let i = 0; i < weights.length; i++) {
+    cumulative += weights[i];
+    if (r < cumulative) { type = CANDY_TYPES[i]; break; }
+  }
+  const baseSpeed = 2.5 + (level - 1) * 0.4;
+  items.push({
+    x:     type.r + Math.random() * (BASE_W - type.r * 2),
+    y:     -type.r,
+    vy:    baseSpeed + Math.random() * 1.5,
+    type,
+    wobble: 0,
+    wobbleV: (Math.random() - 0.5) * 0.06,
+  });
+}
+
+function updateItems() {
+  for (let i = items.length - 1; i >= 0; i--) {
+    const item = items[i];
+    item.y       += item.vy;
+    item.wobble  += item.wobbleV;
+
+    // Bowl collision
+    const bLeft  = bowl.x - BOWL_W / 2;
+    const bRight = bowl.x + BOWL_W / 2;
+    const bTop   = bowl.y - BOWL_H / 2 - item.type.r * 0.5;
+    const bBot   = bowl.y + BOWL_H / 2;
+
+    if (
+      item.x > bLeft && item.x < bRight &&
+      item.y + item.type.r > bTop &&
+      item.y - item.type.r < bBot
+    ) {
+      if (item.type.isBomb) {
+        spawnParticles(item.x, item.y, '#ff4444', 12);
+        lives--;
+        // Flash red
+        canvas.style.boxShadow = '0 0 30px #ff0000';
+        setTimeout(() => { canvas.style.boxShadow = ''; }, 300);
+      } else {
+        score += item.type.pts * level;
+        spawnParticles(item.x, item.y, item.type.color, 8);
+        // Level up?
+        const newLevel = Math.floor(score / PTS_PER_LEVEL) + 1;
+        if (newLevel > level) {
+          level = newLevel;
+          spawnInterval = Math.max(35, 90 - (level - 1) * 8);
+        }
+      }
+      items.splice(i, 1);
+      continue;
+    }
+
+    // Missed candy at bottom
+    if (item.y - item.type.r > BASE_H) {
+      if (!item.type.isBomb) {
+        lives--;
+      }
+      items.splice(i, 1);
+    }
+  }
+}
+
+function drawItem(item) {
+  ctx.save();
+  ctx.translate(item.x, item.y);
+  ctx.rotate(item.wobble);
+
+  // Glow
+  ctx.shadowBlur  = 14;
+  ctx.shadowColor = item.type.color;
+
+  // Circle background
+  ctx.fillStyle = item.type.isBomb ? '#333' : item.type.color + 'aa';
+  ctx.beginPath();
+  ctx.arc(0, 0, item.type.r, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Emoji or bomb
+  ctx.shadowBlur  = 0;
+  ctx.font        = `${item.type.r * 1.3}px serif`;
+  ctx.textAlign   = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(item.type.label, 0, 1);
+  ctx.restore();
+}
+
+// ─────────────────── Bowl ───────────────────
+function updateBowl() {
+  // Keyboard
+  if (keys['ArrowLeft']  || keys['a'] || keys['A']) bowl.vx = -BOWL_SPEED * (1 + level * 0.05);
+  else if (keys['ArrowRight'] || keys['d'] || keys['D']) bowl.vx = BOWL_SPEED * (1 + level * 0.05);
+  else bowl.vx *= 0.75;
+
+  // Mouse
+  if (touchX !== null) {
+    const diff = touchX - bowl.x;
+    bowl.vx = Math.sign(diff) * Math.min(Math.abs(diff) * 0.15, 12);
+  } else if (mouseX !== null) {
+    const diff = mouseX - bowl.x;
+    bowl.vx = Math.sign(diff) * Math.min(Math.abs(diff) * 0.12, 10);
+  }
+
+  bowl.x = Math.max(BOWL_W / 2, Math.min(BASE_W - BOWL_W / 2, bowl.x + bowl.vx));
+}
+
+function drawBowl() {
+  const x  = bowl.x;
+  const y  = bowl.y;
+  const hw = BOWL_W / 2;
+  const hh = BOWL_H / 2;
+
+  // Bowl glow
+  ctx.shadowBlur  = 18;
+  ctx.shadowColor = '#ff9be8';
+
+  // Bowl body (rounded trapezoid shape)
+  ctx.fillStyle = '#ff6bca';
+  ctx.beginPath();
+  ctx.moveTo(x - hw + 10, y - hh);
+  ctx.lineTo(x + hw - 10, y - hh);
+  ctx.lineTo(x + hw + 5,  y + hh);
+  ctx.lineTo(x - hw - 5,  y + hh);
+  ctx.closePath();
+  ctx.fill();
+
+  // Bowl highlight stripe
+  ctx.fillStyle = 'rgba(255,255,255,0.3)';
+  ctx.beginPath();
+  ctx.moveTo(x - hw * 0.5 + 8, y - hh + 4);
+  ctx.lineTo(x - hw * 0.5 + 20, y - hh + 4);
+  ctx.lineTo(x - hw * 0.5 + 18, y - hh + 12);
+  ctx.lineTo(x - hw * 0.5 + 6,  y - hh + 12);
+  ctx.closePath();
+  ctx.fill();
+
+  // Bowl rim
+  ctx.shadowBlur  = 0;
+  ctx.strokeStyle = '#ffd6f3';
+  ctx.lineWidth   = 3;
+  ctx.beginPath();
+  ctx.moveTo(x - hw + 10, y - hh);
+  ctx.lineTo(x + hw - 10, y - hh);
+  ctx.stroke();
+}
+
+// ─────────────────── HUD ───────────────────
+function drawHUD() {
+  // Score
+  ctx.fillStyle = '#fff';
+  ctx.font      = 'bold 22px Arial';
+  ctx.textAlign = 'left';
+  ctx.shadowBlur  = 8;
+  ctx.shadowColor = '#c880ff';
+  ctx.fillText(`Score: ${score}`, 14, 34);
+
+  // Hi score
+  ctx.font      = '14px Arial';
+  ctx.fillStyle = '#ddb8ff';
+  ctx.shadowBlur  = 0;
+  ctx.fillText(`Best: ${hiScore}`, 14, 54);
+
+  // Level
+  ctx.font      = 'bold 18px Arial';
+  ctx.fillStyle = '#fddc3e';
+  ctx.shadowBlur  = 6;
+  ctx.shadowColor = '#ffa800';
+  ctx.textAlign = 'center';
+  ctx.fillText(`Level ${level}`, BASE_W / 2, 34);
+
+  // Lives
+  ctx.shadowBlur = 0;
+  ctx.font       = '22px serif';
+  ctx.textAlign  = 'right';
+  for (let i = 0; i < MAX_LIVES; i++) {
+    ctx.fillStyle = i < lives ? '#ff6bca' : '#555';
+    ctx.fillText('♥', BASE_W - 12 - i * 28, 36);
+  }
+
+  // Progress bar to next level
+  const progress   = (score % PTS_PER_LEVEL) / PTS_PER_LEVEL;
+  const barW       = BASE_W - 28;
+  const barH       = 6;
+  const barX       = 14;
+  const barY       = 58;
+  ctx.fillStyle    = 'rgba(255,255,255,0.1)';
+  ctx.roundRect(barX, barY, barW, barH, 3);
+  ctx.fill();
+  const barGrad = ctx.createLinearGradient(barX, 0, barX + barW, 0);
+  barGrad.addColorStop(0, '#c880ff');
+  barGrad.addColorStop(1, '#fddc3e');
+  ctx.fillStyle = barGrad;
+  ctx.roundRect(barX, barY, barW * progress, barH, 3);
+  ctx.fill();
+}
+
+// ─────────────────── Screens ───────────────────
+function drawTitle() {
+  drawBackground();
+
+  // Title card
+  ctx.shadowBlur  = 30;
+  ctx.shadowColor = '#ff9be8';
+  ctx.fillStyle   = 'rgba(60,20,80,0.85)';
+  ctx.roundRect(40, 140, BASE_W - 80, 360, 24);
+  ctx.fill();
+  ctx.shadowBlur = 0;
+
+  // Title text
+  ctx.textAlign   = 'center';
+  ctx.shadowBlur  = 20;
+  ctx.shadowColor = '#ff6bca';
+  ctx.fillStyle   = '#fff';
+  ctx.font        = 'bold 54px Arial';
+  ctx.fillText('🍭', BASE_W / 2, 220);
+  ctx.font        = 'bold 46px Arial';
+
+  const grad = ctx.createLinearGradient(80, 0, BASE_W - 80, 0);
+  grad.addColorStop(0, '#ff6bca');
+  grad.addColorStop(0.5, '#fddc3e');
+  grad.addColorStop(1, '#a8f0c6');
+  ctx.fillStyle = grad;
+  ctx.fillText('CANDY CASCADE', BASE_W / 2, 280);
+
+  ctx.shadowBlur  = 0;
+  ctx.fillStyle   = '#ddb8ff';
+  ctx.font        = '18px Arial';
+  ctx.fillText('Catch the falling sweets!', BASE_W / 2, 320);
+  ctx.fillText('Avoid the 💣 bombs!', BASE_W / 2, 348);
+
+  ctx.fillStyle = '#c8a2f8';
+  ctx.font      = '15px Arial';
+  ctx.fillText('⬅ ➡  Arrow keys or mouse to move', BASE_W / 2, 388);
+  ctx.fillText('Touch & drag on mobile', BASE_W / 2, 410);
+
+  // Blinking prompt
+  if (blinkOn) {
+    ctx.fillStyle = '#fff';
+    ctx.font      = 'bold 20px Arial';
+    ctx.fillText('▶  Press any key or Click to Start', BASE_W / 2, 460);
+  }
+}
+
+function drawGameOver() {
+  // Dim overlay
+  ctx.fillStyle = 'rgba(20,0,40,0.78)';
+  ctx.fillRect(0, 0, BASE_W, BASE_H);
+
+  // Card
+  ctx.shadowBlur  = 24;
+  ctx.shadowColor = '#ff4444';
+  ctx.fillStyle   = 'rgba(50,10,60,0.95)';
+  ctx.roundRect(60, 180, BASE_W - 120, 330, 22);
+  ctx.fill();
+  ctx.shadowBlur = 0;
+
+  ctx.textAlign = 'center';
+
+  ctx.font        = 'bold 42px Arial';
+  ctx.fillStyle   = '#ff6b6b';
+  ctx.shadowBlur  = 16;
+  ctx.shadowColor = '#ff0000';
+  ctx.fillText('GAME OVER', BASE_W / 2, 250);
+  ctx.shadowBlur = 0;
+
+  ctx.font      = '22px Arial';
+  ctx.fillStyle = '#fddc3e';
+  ctx.fillText(`Score: ${score}`, BASE_W / 2, 295);
+
+  ctx.font      = '18px Arial';
+  ctx.fillStyle = '#ddb8ff';
+  ctx.fillText(`Best: ${hiScore}`, BASE_W / 2, 325);
+
+  ctx.font      = '16px Arial';
+  ctx.fillStyle = '#c8f0a2';
+  ctx.fillText(`Level reached: ${level}`, BASE_W / 2, 353);
+
+  // Play again button
+  const btnX = BASE_W / 2 - 90;
+  const btnY = 390;
+  const btnW = 180;
+  const btnH = 48;
+
+  ctx.shadowBlur  = 18;
+  ctx.shadowColor = '#ff9be8';
+  const btnGrad = ctx.createLinearGradient(btnX, btnY, btnX + btnW, btnY + btnH);
+  btnGrad.addColorStop(0, '#c880ff');
+  btnGrad.addColorStop(1, '#ff6bca');
+  ctx.fillStyle = btnGrad;
+  ctx.roundRect(btnX, btnY, btnW, btnH, 12);
+  ctx.fill();
+  ctx.shadowBlur = 0;
+
+  ctx.fillStyle = '#fff';
+  ctx.font      = 'bold 22px Arial';
+  ctx.fillText('PLAY AGAIN', BASE_W / 2, btnY + 32);
+}
+
+// ─────────────────── Input ───────────────────
+document.addEventListener('keydown', e => {
+  keys[e.key] = true;
+  if (STATE === 'title') startGame();
+  if (STATE === 'over'  && e.key === 'Enter') startGame();
+});
+document.addEventListener('keyup',   e => { keys[e.key] = false; });
+
+canvas.addEventListener('mousemove', e => {
+  const rect = canvas.getBoundingClientRect();
+  mouseX = (e.clientX - rect.left) / scale;
+});
+
+canvas.addEventListener('click', e => {
+  if (STATE === 'title') { startGame(); return; }
+  if (STATE === 'over') {
+    const rect  = canvas.getBoundingClientRect();
+    const cx    = (e.clientX - rect.left) / scale;
+    const cy    = (e.clientY - rect.top)  / scale;
+    const btnX  = BASE_W / 2 - 90;
+    const btnY  = 390;
+    if (cx > btnX && cx < btnX + 180 && cy > btnY && cy < btnY + 48) {
+      startGame();
+    }
+  }
+});
+
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  if (STATE === 'title') { startGame(); return; }
+  if (STATE === 'over')  { startGame(); return; }
+  const rect = canvas.getBoundingClientRect();
+  touchX = (e.touches[0].clientX - rect.left) / scale;
+}, { passive: false });
+
+canvas.addEventListener('touchmove', e => {
+  e.preventDefault();
+  const rect = canvas.getBoundingClientRect();
+  touchX = (e.touches[0].clientX - rect.left) / scale;
+}, { passive: false });
+
+canvas.addEventListener('touchend', () => { touchX = null; });
+
+function startGame() {
+  initGame();
+  STATE = 'play';
+}
+
+// ─────────────────── Game loop ───────────────────
+let lastTime = 0;
+let frameCount = 0;
+hiScore = 0;
+
+function loop(ts) {
+  requestAnimationFrame(loop);
+  const dt = ts - lastTime;
+  if (dt < 14) return; // cap at ~70fps
+  lastTime = ts;
+  frameCount++;
+
+  // Blink
+  blinkTimer++;
+  if (blinkTimer > 30) { blinkTimer = 0; blinkOn = !blinkOn; }
+
+  ctx.clearRect(0, 0, BASE_W, BASE_H);
+
+  if (STATE === 'title') {
+    drawTitle();
+    return;
+  }
+
+  // ── PLAYING ──
+  drawBackground();
+
+  // Spawn items
+  spawnTimer++;
+  if (spawnTimer >= spawnInterval) {
+    spawnTimer = 0;
+    spawnItem();
+    // Occasionally spawn extra at higher levels
+    if (level >= 4 && Math.random() < 0.3) spawnItem();
+    if (level >= 7 && Math.random() < 0.2) spawnItem();
+  }
+
+  updateItems();
+  updateBowl();
+  updateParticles();
+
+  // Draw items
+  items.forEach(drawItem);
+
+  // Draw bowl
+  drawBowl();
+
+  // Draw particles
+  drawParticles();
+
+  // HUD
+  drawHUD();
+
+  // Check game over
+  if (lives <= 0) {
+    if (score > hiScore) hiScore = score;
+    STATE = 'over';
+    items = [];
+  }
+
+  if (STATE === 'over') {
+    drawGameOver();
+  }
+}
+
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

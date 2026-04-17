@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Burst Garden</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #060c14; display: flex; justify-content: center; align-items: center; min-height: 100vh; overflow: hidden; }
+  canvas { display: block; touch-action: none; cursor: crosshair; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+'use strict';
+// Genre: Bubble pop | Date: 2026-04-14
+// BURST GARDEN — Pop coloured bubbles before they escape! Avoid dark skulls.
+// Gold bubbles = 50pts. Chain pops for combos. 60-second rounds.
+// Controls: Click / Tap to pop.
+
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const W = 420, H = 640;
+let scale = 1;
+function resize() {
+  scale = Math.min(window.innerWidth / W, window.innerHeight / H);
+  canvas.width = W; canvas.height = H;
+  canvas.style.width = (W * scale) + 'px'; canvas.style.height = (H * scale) + 'px';
+}
+resize(); window.addEventListener('resize', resize);
+
+const TYPES = [
+  { t:'n', color:'#00e5ff', glow:'#00b8cc', pts:10 },
+  { t:'n', color:'#ff3fa4', glow:'#cc2080', pts:10 },
+  { t:'n', color:'#aaff00', glow:'#77bb00', pts:10 },
+  { t:'n', color:'#c084fc', glow:'#8040cc', pts:10 },
+  { t:'n', color:'#ffd700', glow:'#cc9900', pts:10 },
+  { t:'g', color:'#fff7a0', glow:'#ffd700', pts:50 },
+  { t:'d', color:'#220033', glow:'#660099', pts:-1 },
+];
+
+const S = { TITLE:0, PLAYING:1, DEAD:2 };
+let state = S.TITLE;
+let score, hiScore = 0, lives, timeLeft, bubbles, particles, popTexts;
+let combo, comboTimer, spawnTimer, bgShift = 0;
+const DURATION = 60;
+
+function startGame() {
+  score = 0; lives = 3; timeLeft = DURATION;
+  bubbles = []; particles = []; popTexts = [];
+  combo = 0; comboTimer = 0; spawnTimer = 0;
+  state = S.PLAYING;
+}
+
+function spawnBubble() {
+  const roll = Math.random();
+  const def = roll < 0.08 ? TYPES[5] : roll < 0.18 ? TYPES[6] : TYPES[Math.floor(Math.random()*5)];
+  const minR = def.t==='g'?22:def.t==='d'?26:18, maxR = def.t==='g'?30:def.t==='d'?34:32;
+  const r = minR + Math.random()*(maxR-minR);
+  bubbles.push({ x: r+Math.random()*(W-r*2), y:H+r, r, vy:-(0.8+Math.random()*1.4),
+    vx:(Math.random()-0.5)*0.5, wobble:Math.random()*Math.PI*2, wobSpd:0.02+Math.random()*0.02,
+    def, popT:0, popping:false });
+}
+
+function burst(x, y, color, n=12) {
+  for (let i=0;i<n;i++) {
+    const a=Math.random()*Math.PI*2, s=1.5+Math.random()*5;
+    particles.push({x,y,vx:Math.cos(a)*s,vy:Math.sin(a)*s,color,life:1,decay:0.025+Math.random()*0.04,r:2+Math.random()*4});
+  }
+}
+
+function addText(x, y, text, color) {
+  popTexts.push({x,y,vy:-1.5,text,color,life:1,decay:0.02});
+}
+
+function tryPop(mx, my) {
+  for (let i=bubbles.length-1;i>=0;i--) {
+    const b=bubbles[i];
+    if (b.popping) continue;
+    if (Math.hypot(mx-b.x,my-b.y)<=b.r) {
+      b.popping=true;
+      if (b.def.t==='d') {
+        lives--; burst(b.x,b.y,'#ff3860',16); addText(b.x,b.y-b.r,'-LIFE!','#ff3860');
+        combo=0; comboTimer=0;
+        if (lives<=0) { if(score>hiScore)hiScore=score; setTimeout(()=>{state=S.DEAD;},600); }
+      } else {
+        combo++; comboTimer=36;
+        const m=Math.min(combo,8), pts=b.def.pts*m;
+        score+=pts; burst(b.x,b.y,b.def.color,combo>2?18:10);
+        addText(b.x,b.y-b.r,combo>1?`${pts} x${m}`:`+${pts}`, b.def.t==='g'?'#ffd700':b.def.color);
+      }
+      break;
+    }
+  }
+}
+
+let lastTs=0;
+function update(ts) {
+  const dt=Math.min(ts-lastTs,80); lastTs=ts;
+  if (state!==S.PLAYING) return;
+  bgShift+=0.003;
+  timeLeft=Math.max(0,timeLeft-dt/1000);
+  if (timeLeft<=0&&bubbles.every(b=>b.popping)) { if(score>hiScore)hiScore=score; state=S.DEAD; return; }
+  if (comboTimer>0&&--comboTimer===0) combo=0;
+  spawnTimer+=dt/16.67;
+  const interval=Math.max(22,55/(1+(DURATION-timeLeft)/30));
+  if (spawnTimer>=interval&&timeLeft>2) { spawnBubble(); spawnTimer=0; }
+  for (let i=bubbles.length-1;i>=0;i--) {
+    const b=bubbles[i];
+    if (b.popping) { b.popT+=0.12; if(b.popT>=1)bubbles.splice(i,1); continue; }
+    b.wobble+=b.wobSpd; b.x+=b.vx+Math.sin(b.wobble)*0.3; b.y+=b.vy;
+    if (b.x-b.r<0){b.x=b.r;b.vx=Math.abs(b.vx);}
+    if (b.x+b.r>W){b.x=W-b.r;b.vx=-Math.abs(b.vx);}
+    if (b.y+b.r<0) {
+      if (b.def.t!=='d') { lives--; if(lives<=0){if(score>hiScore)hiScore=score;setTimeout(()=>{state=S.DEAD;},400);} }
+      bubbles.splice(i,1);
+    }
+  }
+  for (let i=particles.length-1;i>=0;i--) {
+    const p=particles[i]; p.x+=p.vx;p.y+=p.vy;p.vx*=0.93;p.vy*=0.93;p.life-=p.decay;
+    if(p.life<=0)particles.splice(i,1);
+  }
+  for (let i=popTexts.length-1;i>=0;i--) {
+    const t=popTexts[i]; t.y+=t.vy; t.life-=t.decay; if(t.life<=0)popTexts.splice(i,1);
+  }
+}
+
+function drawBg() {
+  const g=ctx.createLinearGradient(0,0,W,H);
+  g.addColorStop(0,`hsl(${210+Math.sin(bgShift)*15},60%,5%)`);
+  g.addColorStop(1,`hsl(${260+Math.cos(bgShift)*15},50%,4%)`);
+  ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
+  const sg=ctx.createRadialGradient(W/2,H,10,W/2,H,200);
+  sg.addColorStop(0,'rgba(0,180,255,0.07)'); sg.addColorStop(1,'rgba(0,0,0,0)');
+  ctx.fillStyle=sg; ctx.fillRect(0,0,W,H);
+}
+
+function drawBubble(b) {
+  ctx.save();
+  if (b.popping) {
+    ctx.globalAlpha=1-b.popT;
+    ctx.shadowColor=b.def.glow; ctx.shadowBlur=20;
+    ctx.strokeStyle=b.def.color; ctx.lineWidth=2.5*(1-b.popT);
+    ctx.beginPath(); ctx.arc(b.x,b.y,b.r*(1+b.popT*0.6),0,Math.PI*2); ctx.stroke();
+  } else {
+    ctx.shadowColor=b.def.glow; ctx.shadowBlur=b.def.t==='d'?8:16;
+    const fill=ctx.createRadialGradient(b.x-b.r*0.3,b.y-b.r*0.3,1,b.x,b.y,b.r);
+    if(b.def.t==='d'){fill.addColorStop(0,'rgba(80,0,100,0.6)');fill.addColorStop(1,'rgba(10,0,20,0.85)');}
+    else{fill.addColorStop(0,b.def.color+'22');fill.addColorStop(1,b.def.color+'08');}
+    ctx.fillStyle=fill; ctx.beginPath(); ctx.arc(b.x,b.y,b.r,0,Math.PI*2); ctx.fill();
+    ctx.strokeStyle=b.def.color; ctx.lineWidth=b.def.t==='d'?2.5:2;
+    ctx.beginPath(); ctx.arc(b.x,b.y,b.r,0,Math.PI*2); ctx.stroke();
+    if(b.def.t!=='d'){
+      ctx.fillStyle='rgba(255,255,255,0.3)'; ctx.shadowBlur=0;
+      ctx.beginPath(); ctx.ellipse(b.x-b.r*0.28,b.y-b.r*0.28,b.r*0.28,b.r*0.18,-Math.PI/4,0,Math.PI*2); ctx.fill();
+    }
+    if(b.def.t==='d'||b.def.t==='g'){
+      ctx.fillStyle=b.def.t==='d'?'#cc44ff':'#ffd700';
+      ctx.shadowColor=ctx.fillStyle; ctx.shadowBlur=b.def.t==='g'?10:0;
+      ctx.font=`bold ${b.r*0.9}px sans-serif`; ctx.textAlign='center'; ctx.textBaseline='middle';
+      ctx.fillText(b.def.t==='d'?'☠':'★',b.x,b.y+1);
+    }
+  }
+  ctx.restore();
+}
+
+function drawHUD() {
+  ctx.fillStyle='rgba(6,12,20,0.9)'; ctx.fillRect(0,0,W,50);
+  ctx.fillStyle='rgba(0,180,255,0.15)'; ctx.fillRect(0,49,W,1);
+  ctx.textBaseline='middle';
+  ctx.font='bold 18px Courier New'; ctx.fillStyle='#fff'; ctx.textAlign='left';
+  ctx.fillText(String(score).padStart(6,'0'),12,22);
+  ctx.font='11px Courier New'; ctx.fillStyle='rgba(180,220,255,0.55)';
+  ctx.fillText('BEST '+String(hiScore).padStart(6,'0'),12,38);
+  const tSecs=Math.ceil(timeLeft), tc=tSecs>20?'#00e5ff':tSecs>10?'#ffb300':'#ff3860';
+  ctx.save(); ctx.shadowColor=tc; ctx.shadowBlur=tSecs<=10?14:0;
+  ctx.fillStyle=tc; ctx.font='bold 22px Courier New'; ctx.textAlign='center';
+  ctx.fillText(tSecs+'s',W/2,22); ctx.restore();
+  const bw=W-24;
+  ctx.fillStyle='rgba(255,255,255,0.1)'; ctx.fillRect(12,42,bw,4);
+  const bg=ctx.createLinearGradient(12,0,12+bw,0);
+  bg.addColorStop(0,'#00e5ff'); bg.addColorStop(1,'#c084fc');
+  ctx.fillStyle=bg; ctx.fillRect(12,42,bw*(timeLeft/DURATION),4);
+  for(let i=0;i<lives;i++){
+    ctx.save(); ctx.fillStyle='#ff3fa4'; ctx.shadowColor='#ff3fa4'; ctx.shadowBlur=8;
+    ctx.font='16px sans-serif'; ctx.textAlign='right'; ctx.textBaseline='middle';
+    ctx.fillText('●',W-12-i*20,22); ctx.restore();
+  }
+  if(combo>=2){
+    ctx.save(); ctx.globalAlpha=Math.min(1,comboTimer/20);
+    ctx.fillStyle='#ffd700'; ctx.shadowColor='#ffd700'; ctx.shadowBlur=14;
+    ctx.font=`bold ${14+combo}px Courier New`; ctx.textAlign='center'; ctx.textBaseline='top';
+    ctx.fillText(`COMBO x${Math.min(combo,8)}!`,W/2,54); ctx.restore();
+  }
+}
+
+function drawTitle() {
+  drawBg(); ctx.save(); ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.shadowColor='#00e5ff'; ctx.shadowBlur=40; ctx.fillStyle='#00e5ff';
+  ctx.font='bold 64px Courier New'; ctx.fillText('BURST',W/2,H/2-65);
+  ctx.shadowColor='#ff3fa4'; ctx.shadowBlur=40; ctx.fillStyle='#ff3fa4';
+  ctx.fillText('GARDEN',W/2,H/2+5); ctx.shadowBlur=0;
+  ctx.fillStyle='rgba(255,255,255,0.55)'; ctx.font='13px Courier New';
+  ctx.fillText('Pop bubbles before they escape!',W/2,H/2+60);
+  ctx.fillText('★ Gold = 50pts  ☠ Dark = lose a life',W/2,H/2+80);
+  ctx.fillText('Chain pops for combo multipliers',W/2,H/2+100);
+  const a=0.4+0.6*Math.sin(Date.now()/520);
+  ctx.save(); ctx.globalAlpha=a; ctx.fillStyle='#fff'; ctx.font='bold 16px Courier New';
+  ctx.fillText('Click / Tap to start',W/2,H/2+138); ctx.restore();
+  if(hiScore>0){ctx.fillStyle='rgba(255,215,0,0.75)';ctx.font='12px Courier New';ctx.fillText('BEST: '+hiScore,W/2,H/2+165);}
+  ctx.restore();
+}
+
+function drawDead() {
+  drawBg(); ctx.fillStyle='rgba(6,12,20,0.82)'; ctx.fillRect(0,0,W,H);
+  ctx.save(); ctx.textAlign='center'; ctx.textBaseline='middle';
+  const label=timeLeft<=0?"TIME'S UP!":'GAME OVER';
+  ctx.shadowColor='#ff3860'; ctx.shadowBlur=24; ctx.fillStyle='#ff3860';
+  ctx.font='bold 46px Courier New'; ctx.fillText(label,W/2,H/2-70);
+  ctx.shadowBlur=0; ctx.fillStyle='#fff'; ctx.font='22px Courier New';
+  ctx.fillText('Score: '+score,W/2,H/2-10);
+  if(score>0&&score>=hiScore){ctx.fillStyle='#ffd700';ctx.font='bold 15px Courier New';ctx.shadowColor='#ffd700';ctx.shadowBlur=10;ctx.fillText('✦ NEW BEST! ✦',W/2,H/2+25);}
+  else if(hiScore>0){ctx.fillStyle='rgba(200,180,255,0.7)';ctx.font='13px Courier New';ctx.fillText('Best: '+hiScore,W/2,H/2+25);}
+  const by=H/2+100;
+  ctx.shadowColor='#00e5ff'; ctx.shadowBlur=14; ctx.fillStyle='#00e5ff';
+  ctx.fillRect(W/2-100,by-26,200,52);
+  ctx.shadowBlur=0; ctx.fillStyle='#000'; ctx.font='bold 17px Courier New';
+  ctx.fillText('PLAY AGAIN',W/2,by); ctx.restore();
+}
+
+function loop(ts) {
+  update(ts);
+  if(state===S.TITLE) drawTitle();
+  else if(state===S.DEAD){drawDead();drawParticles();}
+  else{drawBg();for(const b of bubbles)drawBubble(b);drawParticles();
+    for(const t of popTexts){ctx.save();ctx.globalAlpha=t.life;ctx.fillStyle=t.color;ctx.shadowColor=t.color;ctx.shadowBlur=8;ctx.font='bold 16px Courier New';ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText(t.text,t.x,t.y);ctx.restore();}
+    drawHUD();}
+  requestAnimationFrame(loop);
+}
+
+function drawParticles(){for(const p of particles){ctx.save();ctx.globalAlpha=p.life;ctx.fillStyle=p.color;ctx.shadowColor=p.color;ctx.shadowBlur=6;ctx.beginPath();ctx.arc(p.x,p.y,p.r,0,Math.PI*2);ctx.fill();ctx.restore();}}
+
+canvas.addEventListener('click',e=>{
+  if(state!==S.PLAYING){startGame();return;}
+  const r=canvas.getBoundingClientRect();
+  tryPop((e.clientX-r.left)/scale,(e.clientY-r.top)/scale);
+});
+canvas.addEventListener('touchstart',e=>{
+  e.preventDefault();
+  const r=canvas.getBoundingClientRect();
+  const mx=(e.touches[0].clientX-r.left)/scale,my=(e.touches[0].clientY-r.top)/scale;
+  if(state!==S.PLAYING){startGame();return;}
+  tryPop(mx,my);
+},{passive:false});
+document.addEventListener('keydown',()=>{if(state!==S.PLAYING)startGame();});
+
+bubbles=[];particles=[];popTexts=[];
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
