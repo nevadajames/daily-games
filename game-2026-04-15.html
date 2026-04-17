@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sky Stack</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #0a0a1a;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 100vh;
+    overflow: hidden;
+    font-family: 'Segoe UI', Arial, sans-serif;
+  }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="gameCanvas"></canvas>
+<script>
+// Genre: Tower stacker | Date: 2026-04-15
+
+// ── roundRect polyfill ──────────────────────────────────────────────────
+if (!CanvasRenderingContext2D.prototype.roundRect) {
+  CanvasRenderingContext2D.prototype.roundRect = function(x, y, w, h, r) {
+    if (w < 2 * r) r = w / 2;
+    if (h < 2 * r) r = h / 2;
+    this.beginPath();
+    this.moveTo(x + r, y);
+    this.arcTo(x + w, y,     x + w, y + h, r);
+    this.arcTo(x + w, y + h, x,     y + h, r);
+    this.arcTo(x,     y + h, x,     y,     r);
+    this.arcTo(x,     y,     x + w, y,     r);
+    this.closePath();
+    return this;
+  };
+}
+
+// ── Canvas setup ────────────────────────────────────────────────────────
+const canvas = document.getElementById('gameCanvas');
+const ctx    = canvas.getContext('2d');
+const BASE_W = 480;
+const BASE_H = 720;
+let scale = 1;
+
+function resize() {
+  const s = Math.min(window.innerWidth / BASE_W, window.innerHeight / BASE_H);
+  scale = s;
+  canvas.width  = BASE_W * s;
+  canvas.height = BASE_H * s;
+  ctx.setTransform(s, 0, 0, s, 0, 0);
+}
+resize();
+window.addEventListener('resize', resize);
+
+// ── Palette ─────────────────────────────────────────────────────────────
+const PALETTE = [
+  '#ff6ec7', '#ff9f43', '#ffd32a', '#0be881',
+  '#00d2d3', '#54a0ff', '#a29bfe', '#fd79a8',
+  '#55efc4', '#fdcb6e', '#e17055', '#74b9ff'
+];
+
+// ── Game state ───────────────────────────────────────────────────────────
+const PLATFORM_Y   = BASE_H - 80;
+const BLOCK_H      = 28;
+const START_W      = 200;
+const MIN_W        = 20;
+const SPEED_BASE   = 2.2;
+const SPEED_INC    = 0.08;
+
+let STATE = 'title'; // 'title' | 'play' | 'over'
+let score, hiScore, stack, movingBlock, speed, direction, colorIdx, perfectStreak;
+let particles = [];
+let cameraY = 0;
+let targetCameraY = 0;
+
+hiScore = 0;
+
+function initGame() {
+  score         = 0;
+  colorIdx      = 0;
+  perfectStreak = 0;
+  cameraY       = 0;
+  targetCameraY = 0;
+  particles     = [];
+  direction     = 1;
+
+  // Base platform
+  stack = [{
+    x: (BASE_W - START_W) / 2,
+    y: PLATFORM_Y,
+    w: START_W,
+    h: BLOCK_H,
+    color: '#44aaff'
+  }];
+
+  spawnMoving();
+}
+
+function spawnMoving() {
+  const top = stack[stack.length - 1];
+  const spd = SPEED_BASE + score * SPEED_INC;
+  speed = spd > 10 ? 10 : spd;
+
+  movingBlock = {
+    x: direction > 0 ? -top.w : BASE_W,
+    y: top.y - BLOCK_H - 2,
+    w: top.w,
+    h: BLOCK_H,
+    color: PALETTE[colorIdx % PALETTE.length],
+    dir: direction
+  };
+  direction *= -1;
+  colorIdx++;
+}
+
+// ── Particles ───────────────────────────────────────────────────────────
+function spawnParticles(x, y, w, color, count) {
+  for (let i = 0; i < count; i++) {
+    particles.push({
+      x: x + Math.random() * w,
+      y: y,
+      vx: (Math.random() - 0.5) * 4,
+      vy: -(Math.random() * 3 + 1),
+      life: 1,
+      decay: 0.03 + Math.random() * 0.03,
+      r: Math.random() * 5 + 2,
+      color
+    });
+  }
+}
+
+// ── Drop logic ───────────────────────────────────────────────────────────
+function dropBlock() {
+  if (STATE !== 'play') return;
+  const top = stack[stack.length - 1];
+  const mb  = movingBlock;
+
+  const left  = Math.max(mb.x, top.x);
+  const right = Math.min(mb.x + mb.w, top.x + top.w);
+  const overlap = right - left;
+
+  if (overlap <= 0) {
+    // Missed entirely → game over
+    STATE = 'over';
+    if (score > hiScore) hiScore = score;
+    spawnParticles(mb.x, mb.y, mb.w, mb.color, 20);
+    return;
+  }
+
+  const PERFECT_THRESHOLD = 6;
+  const isPerfect = Math.abs(overlap - top.w) <= PERFECT_THRESHOLD && mb.w === top.w;
+
+  let newX = left;
+  let newW = overlap;
+
+  if (isPerfect) {
+    // Perfect — keep same width, snap to top
+    newX = top.x;
+    newW = top.w;
+    perfectStreak++;
+    spawnParticles(newX, mb.y, newW, '#fff', 18);
+    score += 10 + perfectStreak * 5;
+  } else {
+    perfectStreak = 0;
+    score += 10;
+    // Trim piece falls off
+    spawnParticles(
+      mb.dir > 0 ? mb.x : mb.x + overlap,
+      mb.y,
+      mb.w - overlap,
+      mb.color,
+      10
+    );
+  }
+
+  stack.push({ x: newX, y: mb.y, w: newW, h: BLOCK_H, color: mb.color });
+
+  // Scroll camera up
+  if (stack.length > 10) {
+    targetCameraY = (stack.length - 10) * (BLOCK_H + 2);
+  }
+
+  if (newW < MIN_W) {
+    STATE = 'over';
+    if (score > hiScore) hiScore = score;
+    return;
+  }
+
+  spawnMoving();
+}
+
+// ── Input ────────────────────────────────────────────────────────────────
+window.addEventListener('keydown', e => {
+  if (e.code === 'Space' || e.key === ' ') {
+    e.preventDefault();
+    handleAction();
+  }
+});
+canvas.addEventListener('click',     handleAction);
+canvas.addEventListener('touchstart', e => { e.preventDefault(); handleAction(); }, { passive: false });
+
+function handleAction() {
+  if (STATE === 'title') { STATE = 'play'; initGame(); }
+  else if (STATE === 'play')  dropBlock();
+  else if (STATE === 'over')  { STATE = 'play'; initGame(); }
+}
+
+// ── Draw helpers ─────────────────────────────────────────────────────────
+function drawBlock(b, camOff) {
+  const y = b.y - camOff;
+  if (y > BASE_H + 40 || y < -60) return;
+  ctx.fillStyle = b.color;
+  ctx.shadowColor = b.color;
+  ctx.shadowBlur  = 10;
+  ctx.roundRect(b.x, y, b.w, b.h, 4);
+  ctx.fill();
+  ctx.shadowBlur = 0;
+
+  // Shine
+  ctx.fillStyle = 'rgba(255,255,255,0.18)';
+  ctx.roundRect(b.x + 4, y + 4, b.w - 8, 6, 3);
+  ctx.fill();
+}
+
+function drawMoving(camOff) {
+  if (!movingBlock) return;
+  const mb = movingBlock;
+  const y  = mb.y - camOff;
+  ctx.fillStyle = mb.color;
+  ctx.shadowColor = mb.color;
+  ctx.shadowBlur  = 14;
+  ctx.roundRect(mb.x, y, mb.w, mb.h, 4);
+  ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = 'rgba(255,255,255,0.18)';
+  ctx.roundRect(mb.x + 4, y + 4, mb.w - 8, 6, 3);
+  ctx.fill();
+}
+
+function drawParticles(camOff) {
+  for (const p of particles) {
+    ctx.globalAlpha = p.life;
+    ctx.fillStyle   = p.color;
+    ctx.shadowColor = p.color;
+    ctx.shadowBlur  = 6;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y - camOff, p.r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  ctx.shadowBlur  = 0;
+}
+
+function drawBg() {
+  const grad = ctx.createLinearGradient(0, 0, 0, BASE_H);
+  grad.addColorStop(0, '#0a0a2e');
+  grad.addColorStop(1, '#0a0a12');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, BASE_W, BASE_H);
+}
+
+// Guide lines
+function drawGuide(camOff) {
+  if (!movingBlock || STATE !== 'play') return;
+  const top = stack[stack.length - 1];
+  ctx.strokeStyle = 'rgba(255,255,255,0.07)';
+  ctx.setLineDash([6, 8]);
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(top.x, 0);
+  ctx.lineTo(top.x, BASE_H);
+  ctx.moveTo(top.x + top.w, 0);
+  ctx.lineTo(top.x + top.w, BASE_H);
+  ctx.stroke();
+  ctx.setLineDash([]);
+}
+
+// ── Screens ──────────────────────────────────────────────────────────────
+let blinkT = 0;
+
+function drawTitle() {
+  drawBg();
+  // Stars
+  for (let i = 0; i < 80; i++) {
+    const sx = (i * 137.5) % BASE_W;
+    const sy = (i * 97.3)  % BASE_H;
+    const sr = i % 3 === 0 ? 1.5 : 0.8;
+    ctx.fillStyle = `rgba(255,255,255,${0.2 + (i % 5) * 0.1})`;
+    ctx.beginPath();
+    ctx.arc(sx, sy, sr, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Title
+  ctx.textAlign = 'center';
+  ctx.shadowColor = '#54a0ff';
+  ctx.shadowBlur  = 24;
+  ctx.fillStyle   = '#fff';
+  ctx.font        = 'bold 58px Segoe UI, Arial';
+  ctx.fillText('SKY', BASE_W / 2, 220);
+  ctx.fillStyle   = '#ffd32a';
+  ctx.shadowColor = '#ffd32a';
+  ctx.fillText('STACK', BASE_W / 2, 288);
+  ctx.shadowBlur  = 0;
+
+  // Preview blocks
+  const demoColors = ['#54a0ff', '#ffd32a', '#ff6ec7', '#0be881'];
+  for (let i = 0; i < 4; i++) {
+    const bw = 140 - i * 18;
+    const bx = (BASE_W - bw) / 2;
+    const by = 340 + i * (BLOCK_H + 2);
+    ctx.fillStyle   = demoColors[i];
+    ctx.shadowColor = demoColors[i];
+    ctx.shadowBlur  = 8;
+    ctx.roundRect(bx, by, bw, BLOCK_H, 4);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+  }
+
+  // Controls hint
+  ctx.font      = '16px Segoe UI, Arial';
+  ctx.fillStyle = 'rgba(180,180,220,0.85)';
+  ctx.shadowBlur = 0;
+  ctx.fillText('Drop blocks to build a tower.', BASE_W / 2, 490);
+  ctx.fillText('Align perfectly for a PERFECT bonus!', BASE_W / 2, 514);
+
+  // Blink
+  blinkT += 0.04;
+  const alpha = 0.5 + 0.5 * Math.sin(blinkT * 3);
+  ctx.font        = 'bold 18px Segoe UI, Arial';
+  ctx.fillStyle   = `rgba(255,211,42,${alpha})`;
+  ctx.shadowColor = '#ffd32a';
+  ctx.shadowBlur  = 12;
+  ctx.fillText('PRESS SPACE / CLICK TO START', BASE_W / 2, 570);
+  ctx.shadowBlur = 0;
+}
+
+function drawPlay() {
+  drawBg();
+  cameraY += (targetCameraY - cameraY) * 0.12;
+  const cam = cameraY;
+
+  drawGuide(cam);
+
+  for (const b of stack) drawBlock(b, cam);
+  drawMoving(cam);
+  drawParticles(cam);
+
+  // HUD
+  ctx.textAlign = 'left';
+  ctx.font      = 'bold 22px Segoe UI, Arial';
+  ctx.fillStyle = '#fff';
+  ctx.shadowColor = '#54a0ff';
+  ctx.shadowBlur  = 10;
+  ctx.fillText(`Score: ${score}`, 16, 36);
+  ctx.shadowBlur = 0;
+
+  ctx.font      = '14px Segoe UI, Arial';
+  ctx.fillStyle = 'rgba(180,180,220,0.8)';
+  ctx.fillText(`Best: ${hiScore}`, 16, 58);
+
+  if (perfectStreak >= 2) {
+    ctx.textAlign   = 'right';
+    ctx.font        = 'bold 15px Segoe UI, Arial';
+    ctx.fillStyle   = '#ffd32a';
+    ctx.shadowColor = '#ffd32a';
+    ctx.shadowBlur  = 14;
+    ctx.fillText(`🔥 PERFECT ×${perfectStreak}`, BASE_W - 16, 36);
+    ctx.shadowBlur  = 0;
+  }
+
+  ctx.textAlign   = 'right';
+  ctx.font        = '13px Segoe UI, Arial';
+  ctx.fillStyle   = 'rgba(150,150,200,0.7)';
+  ctx.fillText('SPACE / TAP to drop', BASE_W - 16, BASE_H - 16);
+}
+
+function drawOver() {
+  drawBg();
+  const cam = cameraY;
+  for (const b of stack) drawBlock(b, cam);
+  drawParticles(cam);
+
+  // Overlay
+  ctx.fillStyle = 'rgba(0,0,0,0.65)';
+  ctx.fillRect(0, 0, BASE_W, BASE_H);
+
+  ctx.textAlign   = 'center';
+  ctx.fillStyle   = '#ff6ec7';
+  ctx.shadowColor = '#ff6ec7';
+  ctx.shadowBlur  = 20;
+  ctx.font        = 'bold 48px Segoe UI, Arial';
+  ctx.fillText('GAME OVER', BASE_W / 2, 250);
+  ctx.shadowBlur  = 0;
+
+  ctx.fillStyle = '#fff';
+  ctx.font      = '22px Segoe UI, Arial';
+  ctx.fillText(`Score: ${score}`, BASE_W / 2, 312);
+
+  ctx.fillStyle = '#ffd32a';
+  ctx.font      = '16px Segoe UI, Arial';
+  ctx.fillText(`Best: ${hiScore}`, BASE_W / 2, 342);
+
+  // PLAY AGAIN button
+  const bx = BASE_W / 2 - 120, by = 390, bw = 240, bh = 54;
+  ctx.fillStyle   = '#54a0ff';
+  ctx.shadowColor = '#54a0ff';
+  ctx.shadowBlur  = 18;
+  ctx.roundRect(bx, by, bw, bh, 10);
+  ctx.fill();
+  ctx.shadowBlur  = 0;
+  ctx.fillStyle   = '#fff';
+  ctx.font        = 'bold 20px Segoe UI, Arial';
+  ctx.fillText('PLAY AGAIN', BASE_W / 2, by + 35);
+}
+
+// ── Game loop ────────────────────────────────────────────────────────────
+let lastTime = 0;
+
+function loop(ts) {
+  const dt = ts - lastTime;
+  lastTime = ts;
+
+  // Update particles
+  for (const p of particles) {
+    p.x  += p.vx;
+    p.y  += p.vy;
+    p.vy += 0.12;
+    p.life -= p.decay;
+  }
+  particles = particles.filter(p => p.life > 0);
+
+  if (STATE === 'title') {
+    drawTitle();
+  } else if (STATE === 'play') {
+    // Move block
+    if (movingBlock) {
+      movingBlock.x += movingBlock.dir * speed;
+      if (movingBlock.x > BASE_W)       movingBlock.dir = -1;
+      if (movingBlock.x + movingBlock.w < 0) movingBlock.dir =  1;
+    }
+    drawPlay();
+  } else if (STATE === 'over') {
+    drawOver();
+  }
+
+  requestAnimationFrame(loop);
+}
+
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
