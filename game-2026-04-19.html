@@ -1,0 +1,652 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Type Invaders</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: #02020e;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 100vh;
+  overflow: hidden;
+  font-family: 'Courier New', Courier, monospace;
+}
+canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+// Genre: Typing game | Date: 2026-04-19
+
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+
+const LW = 700, LH = 560;
+let scale = 1;
+
+// roundRect polyfill for older browsers
+if (!CanvasRenderingContext2D.prototype.roundRect) {
+  CanvasRenderingContext2D.prototype.roundRect = function (x, y, w, h, r) {
+    r = Math.min(r, w / 2, h / 2);
+    this.beginPath();
+    this.moveTo(x + r, y);
+    this.arcTo(x + w, y, x + w, y + h, r);
+    this.arcTo(x + w, y + h, x, y + h, r);
+    this.arcTo(x, y + h, x, y, r);
+    this.arcTo(x, y, x + w, y, r);
+    this.closePath();
+    return this;
+  };
+}
+
+// ── WORD BANK ─────────────────────────────────────────────────────────────
+const WORD_BANK = [
+  // 3-4 letter words (level 1)
+  'aim','arc','bit','cut','dip','fog','gap','hue','ink','jet','key','map',
+  'orb','pop','ray','sky','tag','web','zap','byte','code','core','data',
+  'fire','flux','glow','grid','hack','heap','hook','idle','jump','kick',
+  'laze','link','load','lock','loop','lure','mesh','mode','node','null',
+  'open','ping','pipe','plot','plug','pool','port','push','rate','read',
+  'ring','root','rust','scan','send','shot','skip','slam','sort','spin',
+  'stop','sync','test','text','tick','time','tint','tool','tree','trim',
+  'type','unit','void','wait','wave','word','worm','zoom','bolt','cell',
+  'chip','clue','coin','cool','crop','cube','dash','deck','disc','disk',
+  'dusk','echo','edge','epic','evil','face','fade','fake','fall','fame',
+  'fast','flat','flow','foam','fold','font','fork','foul','free','fuel',
+  'game','gate','gave','gaze','gear','gems','glow','goal','gold','gone',
+  'grab','grey','grow','halo','hard','heat','hero','high','hill','hold',
+  'holy','home','hope','horn','howl','huge','hull','hunt','hurt','hype',
+  'icon','idea','iris','isle','item','lair','lake','lane','lash','lava',
+  'lead','leaf','lean','leap','lend','lens','lift','like','lime','line',
+  'lion','list','live','lone','long','look','lord','lose','lost','love',
+  'mage','main','make','mall','mana','mark','mars','mass','maze','melt',
+  'mild','mind','mine','miss','mist','mood','moon','move','much','myth',
+  // 5-6 letter words (level 2-3)
+  'alpha','array','audio','batch','blast','block','boost','break','brick',
+  'build','cable','cache','cargo','class','clean','clear','click','clock',
+  'clone','cloud','comet','crash','cycle','debug','delay','delta','depth',
+  'draft','drain','drive','embed','enemy','enter','error','event','extra',
+  'fetch','final','fixed','flash','float','flush','focus','force','frame',
+  'front','gamma','glare','glide','globe','grand','graph','green','group',
+  'guard','guide','heart','hover','hyper','image','index','input','laser',
+  'layer','level','light','limit','liner','macro','match','media','merge',
+  'model','motor','mount','mouse','orbit','order','outer','panel','parse',
+  'patch','pause','pixel','place','plane','plant','plate','point','power',
+  'press','probe','proxy','pulse','query','queue','radar','range','rapid',
+  'reach','ready','relay','remix','reset','retry','robot','route','scale',
+  'scene','score','scout','shade','shape','share','shell','shift','shoot',
+  'short','sigma','slide','slope','smart','solar','solid','sonic','sound',
+  'space','spark','speed','spike','split','squad','stack','stage','state',
+  'stats','storm','style','super','surge','sweep','swift','table','timer',
+  'token','torch','total','trace','track','trail','train','trash','trend',
+  'turbo','ultra','union','value','video','viral','virus','visit','voice',
+  'warp','watch','white','world','write','yield','zenith','comet','focus',
+  // 7-9 letter words (level 4+)
+  'android','battery','boolean','channel','command','compile','control',
+  'counter','crystal','digital','display','encrypt','execute','explore',
+  'faction','feature','fighter','formula','forward','fractal','freedom',
+  'genesis','gravity','hacking','handler','harmony','hotspot','integer',
+  'invader','iterate','kinetic','lantern','library','machine','maximum',
+  'message','minimal','mission','network','neutron','nominal','nuclear',
+  'optical','orbital','organic','package','pattern','phantom','physics',
+  'pioneer','program','protect','quantum','reactor','receive','reroute',
+  'scanner','science','segment','service','shuttle','skyline','soldier',
+  'starship','station','stealth','storage','subject','surface','suspend',
+  'tactical','terminal','texture','torpedo','trigger','upgrade','uplink',
+  'variant','venture','version','voltage','voyager','warrior','warpgate',
+];
+
+function getWordForLevel(lv) {
+  const minLen = Math.min(3 + lv, 7);
+  const maxLen = Math.min(5 + lv, 10);
+  const pool = WORD_BANK.filter(w => w.length >= minLen && w.length <= maxLen);
+  return pool.length > 0 ? pool[Math.floor(Math.random() * pool.length)] : 'laser';
+}
+
+// ── STATE ─────────────────────────────────────────────────────────────────
+let STATE = 'title';
+let score = 0, highScore = 0;
+let lives = 3, level = 1;
+let kills = 0, killsToNext = 8;
+let combo = 0, comboTimer = 0;
+let blinkTimer = 0, stateTimer = 0, levelUpTimer = 0;
+let enemies = [], particles = [], scorePopups = [], stars = [];
+let activeEnemy = null;
+let wrongFlash = 0;
+let spawnTimer = 0, spawnInterval = 160;
+
+for (let i = 0; i < 80; i++) {
+  stars.push({
+    x: Math.random() * LW, y: Math.random() * LH,
+    r: Math.random() * 1.5 + 0.3,
+    phase: Math.random() * Math.PI * 2,
+  });
+}
+
+// ── INIT ──────────────────────────────────────────────────────────────────
+function startGame() {
+  score = 0; lives = 3; level = 1;
+  kills = 0; killsToNext = 8;
+  combo = 0; comboTimer = 0;
+  enemies = []; particles = []; scorePopups = [];
+  activeEnemy = null; wrongFlash = 0;
+  spawnTimer = 0; spawnInterval = 160;
+  STATE = 'playing'; stateTimer = 0;
+}
+
+function spawnEnemy() {
+  const word = getWordForLevel(level);
+  const x = 44 + Math.random() * (LW - 88);
+  const hues = [180, 200, 160, 140, 220];
+  const hue = hues[Math.floor(Math.random() * hues.length)];
+  enemies.push({
+    x, y: -36, baseX: x, word,
+    typed: 0,
+    speed: 0.38 + level * 0.11 + Math.random() * 0.18,
+    wobble: Math.random() * Math.PI * 2,
+    wobbleSpeed: 0.014 + Math.random() * 0.01,
+    wobbleAmp: 10 + Math.random() * 14,
+    color: `hsl(${hue},100%,62%)`,
+    hitFlash: 0,
+  });
+}
+
+// ── INPUT ─────────────────────────────────────────────────────────────────
+window.addEventListener('keydown', e => {
+  if (STATE === 'title' || STATE === 'gameOver') {
+    if (e.key.length === 1 || e.key === 'Enter' || e.key === ' ') startGame();
+    return;
+  }
+  if (STATE === 'levelUp') return;
+  if (STATE !== 'playing') return;
+  const ch = e.key.toLowerCase();
+  if (ch.length !== 1 || !/[a-z]/.test(ch)) return;
+  handleTyping(ch);
+});
+
+function handleTyping(ch) {
+  // Advance active target
+  if (activeEnemy !== null && activeEnemy < enemies.length) {
+    const en = enemies[activeEnemy];
+    if (ch === en.word[en.typed]) {
+      en.typed++;
+      en.hitFlash = 8;
+      if (en.typed === en.word.length) destroyEnemy(activeEnemy);
+    } else {
+      wrongFlash = 12;
+    }
+    return;
+  }
+  // Find new target by first letter
+  for (let i = 0; i < enemies.length; i++) {
+    if (enemies[i].word[0] === ch) {
+      activeEnemy = i;
+      enemies[i].typed = 1;
+      enemies[i].hitFlash = 8;
+      if (enemies[i].typed === enemies[i].word.length) destroyEnemy(i);
+      return;
+    }
+  }
+  wrongFlash = 8;
+}
+
+function destroyEnemy(idx) {
+  const en = enemies[idx];
+  kills++;
+  combo++;
+  comboTimer = 130;
+  const pts = en.word.length * 10 * Math.min(combo, 8);
+  score += pts;
+  spawnExplosion(en.x, en.y, en.color, 22);
+  scorePopups.push({ x: en.x, y: en.y - 10, pts, vy: -1.6, life: 1, decay: 0.016 });
+  enemies.splice(idx, 1);
+  activeEnemy = null;
+  if (kills >= killsToNext) levelUp();
+}
+
+function levelUp() {
+  level++;
+  kills = 0;
+  killsToNext = 8 + level * 2;
+  spawnInterval = Math.max(75, 160 - level * 13);
+  STATE = 'levelUp';
+  levelUpTimer = 130;
+  stateTimer = 0;
+  activeEnemy = null;
+  spawnExplosion(LW / 2, LH / 2, '#a855f7', 40);
+}
+
+function enemyReachedBottom(idx) {
+  spawnExplosion(enemies[idx].x, LH - 62, '#ff4444', 12);
+  enemies.splice(idx, 1);
+  if (activeEnemy === idx) activeEnemy = null;
+  else if (activeEnemy !== null && activeEnemy > idx) activeEnemy--;
+  lives--;
+  combo = 0;
+  comboTimer = 0;
+  if (lives <= 0) {
+    if (score > highScore) highScore = score;
+    STATE = 'gameOver';
+    stateTimer = 0;
+  }
+}
+
+// ── PARTICLES ─────────────────────────────────────────────────────────────
+function spawnExplosion(x, y, color, count) {
+  for (let i = 0; i < count; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const sp = Math.random() * 5 + 0.8;
+    particles.push({
+      x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+      r: Math.random() * 4.5 + 1.5,
+      life: 1, decay: Math.random() * 0.024 + 0.013, color,
+    });
+  }
+}
+
+// ── UPDATE ────────────────────────────────────────────────────────────────
+function update() {
+  blinkTimer++;
+  stateTimer++;
+  if (wrongFlash > 0) wrongFlash--;
+  if (comboTimer > 0) { comboTimer--; if (comboTimer === 0) combo = 0; }
+
+  particles = particles.filter(p => {
+    p.x += p.vx; p.y += p.vy; p.vy += 0.07;
+    p.life -= p.decay; p.r *= 0.965;
+    return p.life > 0;
+  });
+
+  scorePopups.forEach(s => { s.y += s.vy; s.life -= s.decay; });
+  scorePopups.splice(0, scorePopups.length, ...scorePopups.filter(s => s.life > 0));
+
+  if (STATE === 'levelUp') {
+    levelUpTimer--;
+    if (levelUpTimer <= 0) {
+      STATE = 'playing';
+      enemies = []; activeEnemy = null; spawnTimer = 0;
+    }
+    return;
+  }
+  if (STATE !== 'playing') return;
+
+  spawnTimer++;
+  if (spawnTimer >= spawnInterval && enemies.length < 5 + level) {
+    spawnTimer = 0; spawnEnemy();
+  }
+
+  for (let i = enemies.length - 1; i >= 0; i--) {
+    const en = enemies[i];
+    en.wobble += en.wobbleSpeed;
+    en.x = Math.max(40, Math.min(LW - 40, en.baseX + Math.sin(en.wobble) * en.wobbleAmp));
+    en.y += en.speed;
+    if (en.hitFlash > 0) en.hitFlash--;
+    if (en.y > LH - 56) enemyReachedBottom(i);
+  }
+}
+
+// ── DRAW ──────────────────────────────────────────────────────────────────
+function drawStars() {
+  for (const s of stars) {
+    ctx.globalAlpha = (Math.sin(blinkTimer * 0.02 + s.phase) + 1) * 0.17 + 0.04;
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawParticles() {
+  for (const p of particles) {
+    ctx.globalAlpha = Math.max(0, p.life);
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, Math.max(0.1, p.r), 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawEnemy(en, idx) {
+  const isActive = (idx === activeEnemy);
+  const col = isActive ? '#00ffcc' : en.color;
+  const fc = en.hitFlash > 0 ? '#ffffff' : col;
+
+  ctx.save();
+  ctx.translate(en.x, en.y);
+  ctx.shadowColor = fc;
+  ctx.shadowBlur = isActive ? 20 : 9;
+
+  // Saucer disk
+  ctx.fillStyle = en.hitFlash > 0 ? '#ffffff30' : (isActive ? '#00442233' : '#151530');
+  ctx.strokeStyle = fc;
+  ctx.lineWidth = isActive ? 2.5 : 1.5;
+  ctx.beginPath();
+  ctx.ellipse(0, 0, 30, 11, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+
+  // Dome
+  ctx.fillStyle = isActive ? '#001a11' : '#0a0018';
+  ctx.strokeStyle = fc;
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.ellipse(0, -5, 15, 10, 0, Math.PI, 0);
+  ctx.fill();
+  ctx.stroke();
+
+  // Running lights
+  const lc = ['#ff44aa', '#44aaff', '#aaff66'];
+  for (let i = -1; i <= 1; i++) {
+    ctx.fillStyle = lc[i + 1];
+    ctx.shadowColor = lc[i + 1];
+    ctx.shadowBlur = 7;
+    ctx.beginPath();
+    ctx.arc(i * 10, 3, 3, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.shadowBlur = 0;
+  ctx.restore();
+
+  // Word label below saucer
+  const word = en.word;
+  const typed = en.typed;
+  ctx.font = 'bold 14px Courier New';
+  const typedPart = word.slice(0, typed);
+  const remainPart = word.slice(typed);
+  const tw = ctx.measureText(typedPart).width;
+  const rw = ctx.measureText(remainPart).width;
+  const totalW = tw + rw;
+  const lx = en.x - totalW / 2;
+  const ly = en.y + 28;
+
+  // Pill background
+  ctx.fillStyle = isActive ? 'rgba(0,35,25,0.88)' : 'rgba(4,4,18,0.80)';
+  ctx.beginPath();
+  ctx.roundRect(lx - 7, ly - 14, totalW + 14, 19, 4);
+  ctx.fill();
+  if (isActive) {
+    ctx.strokeStyle = '#00ffcc44';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+
+  ctx.textAlign = 'left';
+  if (typedPart) {
+    ctx.fillStyle = '#00ffcc';
+    ctx.fillText(typedPart, lx, ly);
+  }
+  ctx.fillStyle = isActive ? '#ffffff' : '#9999cc';
+  ctx.fillText(remainPart, lx + tw, ly);
+  ctx.textAlign = 'center';
+}
+
+function drawHUD() {
+  ctx.fillStyle = '#02020e';
+  ctx.fillRect(0, 0, LW, 58);
+  ctx.strokeStyle = '#140030';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(0, 58); ctx.lineTo(LW, 58);
+  ctx.stroke();
+
+  ctx.font = 'bold 20px Courier New';
+  ctx.fillStyle = '#00eeff';
+  ctx.textAlign = 'left';
+  ctx.fillText(`SCORE: ${score}`, 20, 37);
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#a855f7';
+  ctx.fillText(`LEVEL ${level}`, LW / 2, 37);
+
+  ctx.textAlign = 'right';
+  const livesStr = '\u2665'.repeat(lives) + '\u2661'.repeat(Math.max(0, 3 - lives));
+  ctx.font = '16px Courier New';
+  ctx.fillStyle = lives > 1 ? '#ff88aa' : '#ff2244';
+  ctx.fillText(livesStr, LW - 20, 37);
+
+  // Level progress bar
+  const pct = Math.min(kills / killsToNext, 1);
+  ctx.fillStyle = '#1a0040';
+  ctx.beginPath();
+  ctx.roundRect(LW / 2 - 85, 46, 170, 6, 3);
+  ctx.fill();
+  ctx.fillStyle = '#a855f7';
+  ctx.beginPath();
+  ctx.roundRect(LW / 2 - 85, 46, 170 * pct, 6, 3);
+  ctx.fill();
+
+  // Combo display
+  if (combo > 1) {
+    ctx.save();
+    ctx.shadowColor = '#ffcc00';
+    ctx.shadowBlur = 12;
+    ctx.font = 'bold 14px Courier New';
+    ctx.fillStyle = '#ffcc00';
+    ctx.textAlign = 'left';
+    ctx.fillText(`\u26A1 x${combo} COMBO!`, 20, 54);
+    ctx.restore();
+  }
+
+  // Danger line
+  ctx.strokeStyle = '#ff000025';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([8, 5]);
+  ctx.beginPath();
+  ctx.moveTo(0, LH - 56); ctx.lineTo(LW, LH - 56);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Error flash overlay
+  if (wrongFlash > 0) {
+    ctx.fillStyle = `rgba(255,0,0,${wrongFlash * 0.022})`;
+    ctx.fillRect(0, 0, LW, LH);
+  }
+}
+
+function drawBottomBar() {
+  ctx.fillStyle = '#050514';
+  ctx.fillRect(0, LH - 48, LW, 48);
+  ctx.strokeStyle = '#140030';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(0, LH - 48); ctx.lineTo(LW, LH - 48);
+  ctx.stroke();
+
+  ctx.textAlign = 'center';
+  if (activeEnemy !== null && activeEnemy < enemies.length) {
+    const en = enemies[activeEnemy];
+    ctx.font = '12px Courier New';
+    ctx.fillStyle = '#556677';
+    ctx.fillText('LOCKED ON \u2192', LW / 2 - 80, LH - 20);
+    ctx.font = 'bold 17px Courier New';
+    ctx.fillStyle = '#00ffcc';
+    ctx.fillText(en.word.toUpperCase(), LW / 2 + 28, LH - 18);
+  } else {
+    ctx.font = '13px Courier New';
+    ctx.fillStyle = '#33334a';
+    ctx.fillText('Type the first letter of any word to lock on and destroy it', LW / 2, LH - 20);
+  }
+}
+
+function drawScorePopups() {
+  ctx.font = 'bold 15px Courier New';
+  ctx.textAlign = 'center';
+  for (const sp of scorePopups) {
+    ctx.globalAlpha = Math.max(0, sp.life);
+    ctx.fillStyle = '#ffcc00';
+    ctx.fillText(`+${sp.pts}`, sp.x, sp.y);
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawTitleScreen() {
+  ctx.fillStyle = '#02020e';
+  ctx.fillRect(0, 0, LW, LH);
+  drawStars();
+
+  ctx.save();
+  ctx.shadowColor = '#00eeff';
+  ctx.shadowBlur = 32;
+  ctx.font = 'bold 58px Courier New';
+  ctx.fillStyle = '#00eeff';
+  ctx.textAlign = 'center';
+  ctx.fillText('TYPE INVADERS', LW / 2, LH / 2 - 100);
+  ctx.restore();
+
+  // Demo UFO
+  ctx.save();
+  ctx.translate(LW / 2, LH / 2 - 32);
+  ctx.shadowColor = '#00ffcc'; ctx.shadowBlur = 14;
+  ctx.fillStyle = '#001f1a'; ctx.strokeStyle = '#00ffcc'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.ellipse(0, 0, 38, 13, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = '#000e0a'; ctx.strokeStyle = '#00ffcc'; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.ellipse(0, -5, 19, 11, 0, Math.PI, 0); ctx.fill(); ctx.stroke();
+  const lc = ['#ff44aa', '#44aaff', '#aaff66'];
+  for (let i = -1; i <= 1; i++) {
+    ctx.fillStyle = lc[i + 1]; ctx.shadowColor = lc[i + 1]; ctx.shadowBlur = 6;
+    ctx.beginPath(); ctx.arc(i * 11, 3, 3.5, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.restore();
+
+  ctx.font = '17px Courier New';
+  ctx.fillStyle = '#7788aa';
+  ctx.textAlign = 'center';
+  ctx.fillText('Alien ships have words — type them to blast them!', LW / 2, LH / 2 + 26);
+  ctx.fillText('First letter locks on. Finish the word to destroy.', LW / 2, LH / 2 + 52);
+  ctx.font = '14px Courier New';
+  ctx.fillStyle = '#556688';
+  ctx.fillText('No mouse needed — keyboard only!', LW / 2, LH / 2 + 78);
+
+  if (Math.floor(blinkTimer / 34) % 2 === 0) {
+    ctx.font = 'bold 17px Courier New';
+    ctx.fillStyle = '#ffcc00';
+    ctx.fillText('\u25B6  PRESS ANY KEY TO START  \u25C0', LW / 2, LH / 2 + 118);
+  }
+  if (highScore > 0) {
+    ctx.font = '15px Courier New';
+    ctx.fillStyle = '#00ffcc';
+    ctx.fillText(`Best Score: ${highScore}`, LW / 2, LH / 2 + 158);
+  }
+}
+
+function drawLevelUpScreen() {
+  ctx.fillStyle = 'rgba(2,2,14,0.82)';
+  ctx.fillRect(0, 0, LW, LH);
+  drawParticles();
+
+  const pulse = Math.sin(stateTimer * 0.11) * 0.13 + 0.87;
+  ctx.save();
+  ctx.shadowColor = '#a855f7'; ctx.shadowBlur = 28;
+  ctx.font = `bold ${Math.round(56 * pulse)}px Courier New`;
+  ctx.fillStyle = '#a855f7';
+  ctx.textAlign = 'center';
+  ctx.fillText(`LEVEL ${level}!`, LW / 2, LH / 2 - 20);
+  ctx.restore();
+  ctx.font = '22px Courier New';
+  ctx.fillStyle = '#00eeff';
+  ctx.textAlign = 'center';
+  ctx.fillText('Get ready\u2026 words are getting longer!', LW / 2, LH / 2 + 38);
+}
+
+function drawGameOverScreen() {
+  ctx.fillStyle = '#02020e';
+  ctx.fillRect(0, 0, LW, LH);
+  drawStars();
+  drawParticles();
+
+  ctx.save();
+  ctx.shadowColor = '#ff3344'; ctx.shadowBlur = 24;
+  ctx.font = 'bold 52px Courier New';
+  ctx.fillStyle = '#ff3344';
+  ctx.textAlign = 'center';
+  ctx.fillText('GAME OVER', LW / 2, LH / 2 - 110);
+  ctx.restore();
+
+  ctx.font = '26px Courier New';
+  ctx.fillStyle = '#00eeff';
+  ctx.textAlign = 'center';
+  ctx.fillText(`Score: ${score.toLocaleString()}`, LW / 2, LH / 2 - 52);
+
+  ctx.font = '18px Courier New';
+  ctx.fillStyle = '#a855f7';
+  ctx.fillText(`Level Reached: ${level}`, LW / 2, LH / 2 - 14);
+
+  if (highScore > 0) {
+    ctx.font = '16px Courier New';
+    ctx.fillStyle = '#00ffcc';
+    ctx.fillText(`Best Score: ${highScore.toLocaleString()}`, LW / 2, LH / 2 + 24);
+  }
+
+  // Play again button
+  const bx = LW / 2, by = LH / 2 + 106;
+  ctx.fillStyle = '#ff000018'; ctx.strokeStyle = '#ff3344'; ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.roundRect(bx - 112, by - 28, 224, 50, 8);
+  ctx.fill(); ctx.stroke();
+  ctx.font = 'bold 18px Courier New';
+  ctx.fillStyle = '#ff3344';
+  ctx.textAlign = 'center';
+  ctx.fillText('PLAY AGAIN', bx, by + 3);
+
+  if (Math.floor(blinkTimer / 34) % 2 === 0) {
+    ctx.font = '13px Courier New';
+    ctx.fillStyle = '#ffcc0088';
+    ctx.fillText('or press any key', bx, by + 38);
+  }
+}
+
+// ── RENDER FRAME ──────────────────────────────────────────────────────────
+function draw() {
+  ctx.save();
+  ctx.scale(scale, scale);
+
+  if (STATE === 'title') { drawTitleScreen(); ctx.restore(); return; }
+  if (STATE === 'gameOver') { drawGameOverScreen(); ctx.restore(); return; }
+  if (STATE === 'levelUp') { drawLevelUpScreen(); ctx.restore(); return; }
+
+  ctx.fillStyle = '#02020e';
+  ctx.fillRect(0, 0, LW, LH);
+  drawStars();
+  drawParticles();
+  for (let i = 0; i < enemies.length; i++) drawEnemy(enemies[i], i);
+  drawScorePopups();
+  drawHUD();
+  drawBottomBar();
+
+  ctx.restore();
+}
+
+// ── RESIZE ────────────────────────────────────────────────────────────────
+function resize() {
+  scale = Math.min(window.innerWidth / LW, window.innerHeight / LH) * 0.97;
+  canvas.width = Math.round(LW * scale);
+  canvas.height = Math.round(LH * scale);
+}
+resize();
+window.addEventListener('resize', resize);
+
+// Play again button click
+canvas.addEventListener('click', e => {
+  if (STATE !== 'gameOver') return;
+  const r = canvas.getBoundingClientRect();
+  const x = (e.clientX - r.left) / scale, y = (e.clientY - r.top) / scale;
+  if (Math.abs(x - LW / 2) < 112 && Math.abs(y - (LH / 2 + 106)) < 28) startGame();
+});
+
+// ── MAIN LOOP ─────────────────────────────────────────────────────────────
+function loop() {
+  update();
+  draw();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
