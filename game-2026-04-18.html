@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Neon Putt</title>
+<title>Neon Putt — 2 Player</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body {
@@ -16,12 +16,114 @@ body {
   font-family: 'Courier New', Courier, monospace;
 }
 canvas { display: block; cursor: crosshair; }
+
+/* ── Name-entry overlay ── */
+#nameScreen {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  background: #070718;
+  z-index: 10;
+}
+#nameCard {
+  text-align: center;
+  width: min(400px, 92vw);
+  padding: 40px 36px;
+  background: #0a0a22;
+  border: 1.5px solid #22225a;
+  border-radius: 18px;
+  box-shadow: 0 0 50px rgba(0,255,200,0.09), 0 0 80px rgba(255,0,204,0.06);
+}
+#nameCard h1 {
+  font-size: 2.1rem;
+  color: #00ffcc;
+  text-shadow: 0 0 22px #00ffcc;
+  margin-bottom: 6px;
+  letter-spacing: -0.01em;
+}
+#nameCard .subtitle {
+  color: #7070bb;
+  font-size: 0.82rem;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  margin-bottom: 34px;
+}
+.inp-group {
+  margin-bottom: 18px;
+  text-align: left;
+}
+.inp-group label {
+  display: block;
+  font-size: 0.75rem;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  margin-bottom: 7px;
+  font-weight: bold;
+}
+.lbl-p1 { color: #00ffcc; }
+.lbl-p2 { color: #ff00cc; }
+.inp-group input {
+  width: 100%;
+  background: #0d0d28;
+  border: 1.5px solid #2a2a5a;
+  border-radius: 8px;
+  padding: 11px 14px;
+  color: #e0d0ff;
+  font-family: 'Courier New', Courier, monospace;
+  font-size: 1rem;
+  outline: none;
+  transition: border-color 0.18s, box-shadow 0.18s;
+}
+.inp-group input:focus {
+  border-color: #5555bb;
+  box-shadow: 0 0 0 3px rgba(85,85,187,0.18);
+}
+#teeOffBtn {
+  margin-top: 10px;
+  width: 100%;
+  padding: 14px 0;
+  background: rgba(255,0,204,0.10);
+  border: 2px solid #ff00cc;
+  border-radius: 9px;
+  color: #ff00cc;
+  font-family: 'Courier New', Courier, monospace;
+  font-size: 1.05rem;
+  font-weight: bold;
+  letter-spacing: 0.12em;
+  cursor: pointer;
+  transition: background 0.18s, box-shadow 0.18s;
+}
+#teeOffBtn:hover {
+  background: rgba(255,0,204,0.22);
+  box-shadow: 0 0 20px rgba(255,0,204,0.3);
+}
 </style>
 </head>
 <body>
+
+<!-- ── Name entry ── -->
+<div id="nameScreen">
+  <div id="nameCard">
+    <h1>⛳ NEON PUTT</h1>
+    <p class="subtitle">2-Player Mini Golf</p>
+    <div class="inp-group">
+      <label class="lbl-p1">▶ Player 1</label>
+      <input id="p1name" type="text" maxlength="14" placeholder="Player 1" autocomplete="off">
+    </div>
+    <div class="inp-group">
+      <label class="lbl-p2">▶ Player 2</label>
+      <input id="p2name" type="text" maxlength="14" placeholder="Player 2" autocomplete="off">
+    </div>
+    <button id="teeOffBtn">▶  TEE OFF!</button>
+  </div>
+</div>
+
 <canvas id="c"></canvas>
 <script>
 // Genre: Mini golf | Date: 2026-04-18
+// 2-Player edition — turn-based with name entry and shared scorecard
 
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
@@ -30,123 +132,90 @@ const ctx = canvas.getContext('2d');
 const LW = 700, LH = 560;
 let scale = 1;
 
-// Course area offsets and dimensions (logical pixels)
+// Course area (logical pixels)
 const CX = 20, CY = 92, CW = 660, CH = 420;
-const BALL_R = 9;
-const HOLE_R = 14;
-const FRICTION = 0.983;
+const BALL_R    = 9;
+const HOLE_R    = 14;
+const FRICTION  = 0.983;
 const STOP_SPEED = 0.14;
 const MAX_POWER = 110;
 
-// roundRect polyfill for older browsers
+// ── roundRect polyfill ──────────────────────────────────────────────────────
 if (!CanvasRenderingContext2D.prototype.roundRect) {
   CanvasRenderingContext2D.prototype.roundRect = function (x, y, w, h, r) {
     r = Math.min(r, w / 2, h / 2);
     this.beginPath();
     this.moveTo(x + r, y);
-    this.arcTo(x + w, y, x + w, y + h, r);
-    this.arcTo(x + w, y + h, x, y + h, r);
-    this.arcTo(x, y + h, x, y, r);
-    this.arcTo(x, y, x + w, y, r);
+    this.arcTo(x + w, y,     x + w, y + h, r);
+    this.arcTo(x + w, y + h, x,     y + h, r);
+    this.arcTo(x,     y + h, x,     y,     r);
+    this.arcTo(x,     y,     x + w, y,     r);
     this.closePath();
     return this;
   };
 }
 
-// ── HOLE DEFINITIONS (coordinates in course space: 0..CW, 0..CH) ──────────
-// Walls: [x, y, width, height]. Border walls are added automatically.
+// ── HOLE DEFINITIONS ────────────────────────────────────────────────────────
 const HOLES = [
   {
     name: 'Warm Up', par: 2,
     ball: [60, 210], hole: [590, 210],
-    walls: [
-      [240,  0, 18, 155],
-      [240, 265, 18, 155],
-    ]
+    walls: [[240, 0, 18, 155], [240, 265, 18, 155]],
   },
   {
     name: 'Dogleg', par: 2,
     ball: [60, 60], hole: [590, 360],
-    walls: [
-      [0,   200, 340, 18],
-      [320, 200, 18, 220],
-    ]
+    walls: [[0, 200, 340, 18], [320, 200, 18, 220]],
   },
   {
     name: 'Staircase', par: 3,
     ball: [60, 380], hole: [590, 40],
-    walls: [
-      [160,   0, 18, 270],
-      [320, 150, 18, 270],
-      [480,   0, 18, 270],
-    ]
+    walls: [[160, 0, 18, 270], [320, 150, 18, 270], [480, 0, 18, 270]],
   },
   {
     name: 'Snake', par: 3,
     ball: [60, 40], hole: [590, 380],
-    walls: [
-      [160, 150, 18, 270],
-      [320,   0, 18, 270],
-      [480, 150, 18, 270],
-    ]
+    walls: [[160, 150, 18, 270], [320, 0, 18, 270], [480, 150, 18, 270]],
   },
   {
     name: 'The Island', par: 3,
     ball: [60, 210], hole: [590, 210],
-    walls: [
-      [200,  80, 18, 260],
-      [440,  80, 18, 260],
-      [200,  80, 240, 18],
-      [200, 322, 240, 18],
-    ]
+    walls: [[200, 80, 18, 260], [440, 80, 18, 260], [200, 80, 240, 18], [200, 322, 240, 18]],
   },
   {
     name: 'Zigzag', par: 3,
     ball: [60, 40], hole: [590, 380],
-    walls: [
-      [180,   0, 18, 300],
-      [360, 120, 18, 300],
-      [540,   0, 18, 300],
-    ]
+    walls: [[180, 0, 18, 300], [360, 120, 18, 300], [540, 0, 18, 300]],
   },
   {
     name: 'The Maze', par: 4,
     ball: [60, 210], hole: [590, 210],
     walls: [
-      [150,   0, 18, 185],
-      [150, 235, 18, 185],
-      [300,  60, 18, 185],
-      [300, 305, 18, 115],
-      [450,   0, 18, 115],
-      [450, 165, 18, 255],
-    ]
+      [150, 0, 18, 185], [150, 235, 18, 185],
+      [300, 60, 18, 185], [300, 305, 18, 115],
+      [450, 0, 18, 115],  [450, 165, 18, 255],
+    ],
   },
   {
     name: 'Crossroads', par: 4,
     ball: [60, 60], hole: [590, 360],
     walls: [
-      [200,   0, 18, 160],
-      [200, 260, 18, 160],
-      [  0, 180, 160, 18],
-      [260, 180, 180, 18],
-      [400,   0, 18, 160],
-      [400, 260, 18, 160],
+      [200, 0, 18, 160], [200, 260, 18, 160],
+      [0, 180, 160, 18], [260, 180, 180, 18],
+      [400, 0, 18, 160], [400, 260, 18, 160],
       [460, 180, 200, 18],
-    ]
+    ],
   },
   {
     name: 'Final Boss', par: 4,
     ball: [60, 380], hole: [590, 40],
     walls: [
-      [130,   0, 18, 130],
-      [130, 290, 18, 130],
+      [130, 0, 18, 130], [130, 290, 18, 130],
       [260, 130, 18, 160],
-      [390,   0, 18, 160],
-      [390, 260, 18, 160],
+      [390, 0, 18, 160],  [390, 260, 18, 160],
       [520, 130, 18, 160],
-      [  0, 200,  90, 18],
-      [570, 200,  90, 18],
-    ]
+      [0, 200, 90, 18],   [570, 200, 90, 18],
+    ],
   },
 ];
 
@@ -154,98 +223,136 @@ const TOTAL_PAR = HOLES.reduce((a, h) => a + h.par, 0);
 
 function getBorderWalls() {
   return [
-    [0, 0, CW, 18],
-    [0, CH - 18, CW, 18],
-    [0, 0, 18, CH],
-    [CW - 18, 0, 18, CH],
+    [0, 0, CW, 18], [0, CH - 18, CW, 18],
+    [0, 0, 18, CH], [CW - 18, 0, 18, CH],
   ];
 }
-
 function getAllWalls(idx) {
   return [...HOLES[idx].walls, ...getBorderWalls()];
 }
 
-// ── STATE ──────────────────────────────────────────────────────────────────
-let STATE = 'title'; // title | playing | holeComplete | gameOver
+// ── PLAYERS ──────────────────────────────────────────────────────────────────
+const PLAYER_COLORS = ['#00ffcc', '#ff00cc'];
+const PLAYER_GLOWS  = ['#00ffcc', '#ff00cc'];
+
+let players = [
+  { name: 'Player 1', shots: [] },
+  { name: 'Player 2', shots: [] },
+];
+let currentPlayer = 0; // 0 or 1
+
+function cp() { return players[currentPlayer]; }
+function playerColor(idx) { return PLAYER_COLORS[idx ?? currentPlayer]; }
+
+// ── STATE ────────────────────────────────────────────────────────────────────
+let STATE = 'idle'; // idle | playing | holeComplete | gameOver
 let holeIdx = 0;
-let holeShots = [];
-let totalShots = 0;
-let highScore = null;
 let ball = { x: 0, y: 0, vx: 0, vy: 0 };
 let ballStopped = true;
 let isDragging = false;
-let dragStart = { x: 0, y: 0 };
+let dragStart   = { x: 0, y: 0 };
 let dragCurrent = { x: 0, y: 0 };
-let blinkTimer = 0;
-let stateTimer = 0;
-let particles = [];
-let stars = [];
-let ballInHole = false;
+let blinkTimer  = 0;
+let stateTimer  = 0;
+let particles   = [];
+let stars       = [];
+let ballInHole  = false;
 
 // Pre-generate background stars
 for (let i = 0; i < 70; i++) {
   stars.push({
-    x: Math.random() * LW,
-    y: Math.random() * LH,
+    x: Math.random() * LW, y: Math.random() * LH,
     r: Math.random() * 1.4 + 0.4,
     phase: Math.random() * Math.PI * 2,
   });
 }
 
-// ── INIT ───────────────────────────────────────────────────────────────────
+// ── NAME-ENTRY FORM ──────────────────────────────────────────────────────────
+const nameScreen = document.getElementById('nameScreen');
+
+function showNameScreen() {
+  nameScreen.style.display = 'flex';
+  setTimeout(() => document.getElementById('p1name').focus(), 80);
+}
+
+function hideNameScreenAndStart() {
+  const n1 = document.getElementById('p1name').value.trim();
+  const n2 = document.getElementById('p2name').value.trim();
+  players[0].name = n1 || 'Player 1';
+  players[1].name = n2 || 'Player 2';
+  nameScreen.style.display = 'none';
+  startGame();
+}
+
+document.getElementById('teeOffBtn').addEventListener('click', hideNameScreenAndStart);
+document.getElementById('p1name').addEventListener('keydown', e => {
+  if (e.key === 'Enter') document.getElementById('p2name').focus();
+});
+document.getElementById('p2name').addEventListener('keydown', e => {
+  if (e.key === 'Enter') hideNameScreenAndStart();
+});
+
+// ── INIT ──────────────────────────────────────────────────────────────────────
 function initHole(idx) {
-  holeIdx = idx;
-  const h = HOLES[idx];
-  ball.x = h.ball[0] + CX;
-  ball.y = h.ball[1] + CY;
-  ball.vx = 0;
-  ball.vy = 0;
+  holeIdx    = idx;
+  const h    = HOLES[idx];
+  ball.x     = h.ball[0] + CX;
+  ball.y     = h.ball[1] + CY;
+  ball.vx    = 0; ball.vy = 0;
   ballStopped = true;
-  ballInHole = false;
-  isDragging = false;
-  particles = [];
-  if (holeShots[idx] === undefined) holeShots[idx] = 0;
+  ballInHole  = false;
+  isDragging  = false;
+  particles   = [];
+  if (cp().shots[idx] === undefined) cp().shots[idx] = 0;
 }
 
 function startGame() {
-  holeShots = new Array(HOLES.length).fill(0);
-  totalShots = 0;
+  players[0].shots = new Array(HOLES.length).fill(0);
+  players[1].shots = new Array(HOLES.length).fill(0);
+  currentPlayer = 0;
   STATE = 'playing';
   initHole(0);
 }
 
-function nextHole() {
-  if (holeIdx + 1 < HOLES.length) {
+// Called when current player finishes a hole — advance turn or hole
+function advanceAfterHole() {
+  if (currentPlayer === 0) {
+    // Switch to player 2 for the same hole
+    currentPlayer = 1;
     STATE = 'playing';
-    initHole(holeIdx + 1);
+    initHole(holeIdx);
   } else {
-    totalShots = holeShots.reduce((a, b) => a + b, 0);
-    if (highScore === null || totalShots < highScore) highScore = totalShots;
-    STATE = 'gameOver';
-    stateTimer = 0;
+    // Both players done — move to next hole (or game over)
+    currentPlayer = 0;
+    if (holeIdx + 1 < HOLES.length) {
+      STATE = 'playing';
+      initHole(holeIdx + 1);
+    } else {
+      STATE = 'gameOver';
+      stateTimer = 0;
+    }
   }
 }
 
-// ── INPUT ──────────────────────────────────────────────────────────────────
+// ── INPUT ────────────────────────────────────────────────────────────────────
 function getLogPos(e) {
   const rect = canvas.getBoundingClientRect();
-  const src = e.touches ? e.touches[0] : e;
+  const src  = e.touches ? e.touches[0] : e;
   return {
     x: (src.clientX - rect.left) / scale,
-    y: (src.clientY - rect.top) / scale,
+    y: (src.clientY - rect.top)  / scale,
   };
 }
 
 function onPointerDown(e) {
-  if (STATE === 'title' || STATE === 'gameOver') { startGame(); return; }
-  if (STATE === 'holeComplete') { nextHole(); return; }
+  if (STATE === 'holeComplete') { advanceAfterHole(); return; }
   if (STATE !== 'playing' || !ballStopped || ballInHole) return;
   const pos = getLogPos(e);
   const dx = pos.x - ball.x, dy = pos.y - ball.y;
   if (Math.sqrt(dx * dx + dy * dy) < 45) {
-    isDragging = true;
-    dragStart = { x: ball.x, y: ball.y };
-    dragCurrent = { x: pos.x, y: pos.y };
+    isDragging  = true;
+    dragStart   = { x: ball.x, y: ball.y };
+    dragCurrent = { x: pos.x,  y: pos.y  };
   }
 }
 
@@ -258,8 +365,8 @@ function onPointerMove(e) {
 function onPointerUp(e) {
   if (!isDragging) return;
   isDragging = false;
-  const dx = dragStart.x - dragCurrent.x;
-  const dy = dragStart.y - dragCurrent.y;
+  const dx   = dragStart.x - dragCurrent.x;
+  const dy   = dragStart.y - dragCurrent.y;
   const dist = Math.sqrt(dx * dx + dy * dy);
   if (dist < 6) return;
   const power = Math.min(dist, MAX_POWER);
@@ -267,30 +374,40 @@ function onPointerUp(e) {
   ball.vx = (dx / dist) * speed;
   ball.vy = (dy / dist) * speed;
   ballStopped = false;
-  holeShots[holeIdx]++;
+  cp().shots[holeIdx]++;
 }
 
-canvas.addEventListener('mousedown', onPointerDown);
-canvas.addEventListener('mousemove', onPointerMove);
-canvas.addEventListener('mouseup', onPointerUp);
+canvas.addEventListener('mousedown',  onPointerDown);
+canvas.addEventListener('mousemove',  onPointerMove);
+canvas.addEventListener('mouseup',    onPointerUp);
 canvas.addEventListener('touchstart', onPointerDown, { passive: false });
-canvas.addEventListener('touchmove', onPointerMove, { passive: false });
-canvas.addEventListener('touchend', onPointerUp, { passive: false });
+canvas.addEventListener('touchmove',  onPointerMove, { passive: false });
+canvas.addEventListener('touchend',   onPointerUp,   { passive: false });
 
 window.addEventListener('keydown', () => {
-  if (STATE === 'title' || STATE === 'gameOver') startGame();
-  else if (STATE === 'holeComplete') nextHole();
+  if (STATE === 'holeComplete') advanceAfterHole();
+  else if (STATE === 'gameOver') { showNameScreen(); STATE = 'idle'; }
 });
 
-// Play Again button click
+// Play Again / Change Players button
 canvas.addEventListener('click', e => {
   if (STATE !== 'gameOver') return;
   const pos = getLogPos(e);
-  const bx = LW / 2, by = LH / 2 + 195;
-  if (Math.abs(pos.x - bx) < 105 && Math.abs(pos.y - by) < 28) startGame();
+  // Play again (same names)
+  const b1x = LW / 2 - 120, b1y = LH / 2 + 185;
+  if (pos.x >= b1x - 95 && pos.x <= b1x + 95 && pos.y >= b1y - 26 && pos.y <= b1y + 26) {
+    startGame();
+    return;
+  }
+  // Change players
+  const b2x = LW / 2 + 120, b2y = LH / 2 + 185;
+  if (pos.x >= b2x - 95 && pos.x <= b2x + 95 && pos.y >= b2y - 26 && pos.y <= b2y + 26) {
+    showNameScreen();
+    STATE = 'idle';
+  }
 });
 
-// ── PHYSICS ────────────────────────────────────────────────────────────────
+// ── PHYSICS ──────────────────────────────────────────────────────────────────
 function rectOverlapsBall(wx, wy, ww, wh) {
   const nx = Math.max(wx, Math.min(ball.x, wx + ww));
   const ny = Math.max(wy, Math.min(ball.y, wy + wh));
@@ -299,15 +416,14 @@ function rectOverlapsBall(wx, wy, ww, wh) {
 }
 
 function resolveWall(wx, wy, ww, wh) {
-  const nx = Math.max(wx, Math.min(ball.x, wx + ww));
-  const ny = Math.max(wy, Math.min(ball.y, wy + wh));
-  let dx = ball.x - nx, dy = ball.y - ny;
+  const nx  = Math.max(wx, Math.min(ball.x, wx + ww));
+  const ny  = Math.max(wy, Math.min(ball.y, wy + wh));
+  let dx    = ball.x - nx, dy = ball.y - ny;
   const dist = Math.sqrt(dx * dx + dy * dy);
   if (dist === 0) { dx = 1; dy = 0; }
   const ndx = dx / (dist || 1), ndy = dy / (dist || 1);
-  const overlap = BALL_R - dist;
-  ball.x += ndx * overlap;
-  ball.y += ndy * overlap;
+  ball.x += ndx * (BALL_R - dist);
+  ball.y += ndy * (BALL_R - dist);
   const dot = ball.vx * ndx + ball.vy * ndy;
   if (dot < 0) {
     ball.vx -= 2 * dot * ndx;
@@ -317,10 +433,10 @@ function resolveWall(wx, wy, ww, wh) {
   }
 }
 
-// ── PARTICLES ──────────────────────────────────────────────────────────────
+// ── PARTICLES ────────────────────────────────────────────────────────────────
 function spawnParticles(x, y, color, count) {
   for (let i = 0; i < count; i++) {
-    const a = Math.random() * Math.PI * 2;
+    const a  = Math.random() * Math.PI * 2;
     const sp = Math.random() * 4.5 + 0.5;
     particles.push({
       x, y,
@@ -333,12 +449,11 @@ function spawnParticles(x, y, color, count) {
   }
 }
 
-// ── UPDATE ─────────────────────────────────────────────────────────────────
+// ── UPDATE ────────────────────────────────────────────────────────────────────
 function update() {
   blinkTimer++;
   stateTimer++;
 
-  // Particles
   particles = particles.filter(p => {
     p.x += p.vx; p.y += p.vy;
     p.vy += 0.07;
@@ -349,28 +464,25 @@ function update() {
 
   if (STATE !== 'playing' || ballStopped || ballInHole) return;
 
-  // Friction & movement
   ball.vx *= FRICTION;
   ball.vy *= FRICTION;
-  ball.x += ball.vx;
-  ball.y += ball.vy;
+  ball.x  += ball.vx;
+  ball.y  += ball.vy;
 
   // Wall collisions
-  const walls = getAllWalls(holeIdx);
-  for (const w of walls) {
+  for (const w of getAllWalls(holeIdx)) {
     if (rectOverlapsBall(CX + w[0], CY + w[1], w[2], w[3])) {
       resolveWall(CX + w[0], CY + w[1], w[2], w[3]);
     }
   }
 
   // Hole capture
-  const h = HOLES[holeIdx];
+  const h  = HOLES[holeIdx];
   const hx = CX + h.hole[0], hy = CY + h.hole[1];
   const hdx = ball.x - hx, hdy = ball.y - hy;
-  const hd = Math.sqrt(hdx * hdx + hdy * hdy);
-  const sp = Math.sqrt(ball.vx * ball.vx + ball.vy * ball.vy);
+  const hd  = Math.sqrt(hdx * hdx + hdy * hdy);
+  const sp  = Math.sqrt(ball.vx * ball.vx + ball.vy * ball.vy);
 
-  // Gentle attraction when close and slow
   if (hd < HOLE_R * 2.2 && sp < 5) {
     const pull = 0.28 * (1 - hd / (HOLE_R * 2.2));
     ball.vx -= (hdx / (hd || 1)) * pull;
@@ -381,22 +493,19 @@ function update() {
     ball.vx = 0; ball.vy = 0;
     ball.x = hx; ball.y = hy;
     ballStopped = true;
-    ballInHole = true;
-    spawnParticles(hx, hy, '#ff00cc', 28);
-    spawnParticles(hx, hy, '#00ffcc', 20);
+    ballInHole  = true;
+    const col = playerColor();
+    spawnParticles(hx, hy, col, 28);
+    spawnParticles(hx, hy, '#ffffff', 12);
     STATE = 'holeComplete';
     stateTimer = 0;
     return;
   }
 
-  // Stop check
-  if (sp < STOP_SPEED) {
-    ball.vx = 0; ball.vy = 0;
-    ballStopped = true;
-  }
+  if (sp < STOP_SPEED) { ball.vx = 0; ball.vy = 0; ballStopped = true; }
 }
 
-// ── DRAWING ────────────────────────────────────────────────────────────────
+// ── DRAWING HELPERS ──────────────────────────────────────────────────────────
 function drawStars() {
   for (const s of stars) {
     const a = (Math.sin(blinkTimer * 0.018 + s.phase) + 1) * 0.15 + 0.05;
@@ -412,7 +521,7 @@ function drawStars() {
 function drawParticles() {
   for (const p of particles) {
     ctx.globalAlpha = Math.max(0, p.life);
-    ctx.fillStyle = p.color;
+    ctx.fillStyle   = p.color;
     ctx.beginPath();
     ctx.arc(p.x, p.y, Math.max(0.1, p.r), 0, Math.PI * 2);
     ctx.fill();
@@ -421,106 +530,65 @@ function drawParticles() {
 }
 
 function drawCourse() {
-  // Course backdrop
   ctx.fillStyle = '#09091f';
-  ctx.beginPath();
-  ctx.roundRect(CX, CY, CW, CH, 5);
-  ctx.fill();
-  ctx.strokeStyle = '#22225a';
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.roundRect(CX, CY, CW, CH, 5);
-  ctx.stroke();
-
-  // Grid dots
+  ctx.beginPath(); ctx.roundRect(CX, CY, CW, CH, 5); ctx.fill();
+  ctx.strokeStyle = '#22225a'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.roundRect(CX, CY, CW, CH, 5); ctx.stroke();
   ctx.fillStyle = '#ffffff09';
-  for (let gx = CX + 30; gx < CX + CW; gx += 42) {
+  for (let gx = CX + 30; gx < CX + CW; gx += 42)
     for (let gy = CY + 30; gy < CY + CH; gy += 42) {
-      ctx.beginPath();
-      ctx.arc(gx, gy, 1, 0, Math.PI * 2);
-      ctx.fill();
+      ctx.beginPath(); ctx.arc(gx, gy, 1, 0, Math.PI * 2); ctx.fill();
     }
-  }
 }
 
 function drawWalls() {
-  const walls = getAllWalls(holeIdx);
-  ctx.shadowColor = '#4444cc';
-  ctx.shadowBlur = 7;
-  for (const w of walls) {
+  ctx.shadowColor = '#4444cc'; ctx.shadowBlur = 7;
+  for (const w of getAllWalls(holeIdx)) {
     ctx.fillStyle = '#1c1c48';
-    ctx.beginPath();
-    ctx.roundRect(CX + w[0], CY + w[1], w[2], w[3], 3);
-    ctx.fill();
-    ctx.strokeStyle = '#5555bb';
-    ctx.lineWidth = 1.5;
-    ctx.stroke();
+    ctx.beginPath(); ctx.roundRect(CX + w[0], CY + w[1], w[2], w[3], 3); ctx.fill();
+    ctx.strokeStyle = '#5555bb'; ctx.lineWidth = 1.5; ctx.stroke();
   }
   ctx.shadowBlur = 0;
 }
 
 function drawHoleTarget() {
-  const h = HOLES[holeIdx];
+  const h  = HOLES[holeIdx];
   const hx = CX + h.hole[0], hy = CY + h.hole[1];
-
-  // Outer glow rings
   for (let i = 4; i >= 1; i--) {
     ctx.strokeStyle = `rgba(255,0,204,${0.08 * (5 - i)})`;
     ctx.lineWidth = i * 2.5;
-    ctx.beginPath();
-    ctx.arc(hx, hy, HOLE_R + i * 3, 0, Math.PI * 2);
-    ctx.stroke();
+    ctx.beginPath(); ctx.arc(hx, hy, HOLE_R + i * 3, 0, Math.PI * 2); ctx.stroke();
   }
-  // Hole cup
   ctx.fillStyle = '#000008';
-  ctx.beginPath();
-  ctx.arc(hx, hy, HOLE_R, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.strokeStyle = '#ff00cc';
-  ctx.lineWidth = 2.5;
-  ctx.stroke();
-
-  // Flag pole
-  ctx.strokeStyle = '#cc3366';
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.moveTo(hx + 2, hy - HOLE_R + 1);
-  ctx.lineTo(hx + 2, hy - HOLE_R - 22);
-  ctx.stroke();
-  // Flag pennant
+  ctx.beginPath(); ctx.arc(hx, hy, HOLE_R, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = '#ff00cc'; ctx.lineWidth = 2.5; ctx.stroke();
+  ctx.strokeStyle = '#cc3366'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(hx + 2, hy - HOLE_R + 1); ctx.lineTo(hx + 2, hy - HOLE_R - 22); ctx.stroke();
   ctx.fillStyle = '#ff4488';
   ctx.beginPath();
   ctx.moveTo(hx + 2, hy - HOLE_R - 22);
   ctx.lineTo(hx + 17, hy - HOLE_R - 15);
   ctx.lineTo(hx + 2, hy - HOLE_R - 9);
-  ctx.closePath();
-  ctx.fill();
+  ctx.closePath(); ctx.fill();
 }
 
 function drawBall() {
   if (ballInHole) return;
-  // Outer glow
+  const col = playerColor();
   const g = ctx.createRadialGradient(ball.x, ball.y, 0, ball.x, ball.y, BALL_R * 3.2);
-  g.addColorStop(0, 'rgba(0,255,200,0.22)');
-  g.addColorStop(1, 'rgba(0,255,200,0)');
+  g.addColorStop(0, col + '38'); g.addColorStop(1, col + '00');
   ctx.fillStyle = g;
-  ctx.beginPath();
-  ctx.arc(ball.x, ball.y, BALL_R * 3.2, 0, Math.PI * 2);
-  ctx.fill();
-  // Ball body
+  ctx.beginPath(); ctx.arc(ball.x, ball.y, BALL_R * 3.2, 0, Math.PI * 2); ctx.fill();
   const bg = ctx.createRadialGradient(
     ball.x - BALL_R * 0.32, ball.y - BALL_R * 0.32, BALL_R * 0.1,
     ball.x, ball.y, BALL_R
   );
-  bg.addColorStop(0, '#aaffee');
-  bg.addColorStop(1, '#00bb99');
+  // Lighter tint of player color
+  bg.addColorStop(0, currentPlayer === 0 ? '#aaffee' : '#ffaaee');
+  bg.addColorStop(1, currentPlayer === 0 ? '#00bb99' : '#bb0099');
   ctx.fillStyle = bg;
-  ctx.beginPath();
-  ctx.arc(ball.x, ball.y, BALL_R, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.strokeStyle = '#00ffcc';
-  ctx.lineWidth = 1.5;
-  ctx.stroke();
+  ctx.beginPath(); ctx.arc(ball.x, ball.y, BALL_R, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = col; ctx.lineWidth = 1.5; ctx.stroke();
 }
 
 function drawAimGuide() {
@@ -532,145 +600,102 @@ function drawAimGuide() {
   const ratio = Math.min(dist, MAX_POWER) / MAX_POWER;
   const nx = dx / dist, ny = dy / dist;
   const lineLen = 55 + ratio * 75;
-
-  // Direction arrow line
   ctx.save();
   ctx.setLineDash([7, 5]);
   ctx.strokeStyle = `rgba(255,200,0,${0.28 + ratio * 0.55})`;
   ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.moveTo(ball.x, ball.y);
-  ctx.lineTo(ball.x + nx * lineLen, ball.y + ny * lineLen);
-  ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(ball.x, ball.y); ctx.lineTo(ball.x + nx * lineLen, ball.y + ny * lineLen); ctx.stroke();
   ctx.setLineDash([]);
-
-  // Power ring
   const col = ratio < 0.45 ? '#00ff88' : ratio < 0.78 ? '#ffcc00' : '#ff4444';
-  ctx.strokeStyle = col;
-  ctx.lineWidth = 2.5;
-  ctx.globalAlpha = 0.75;
-  ctx.beginPath();
-  ctx.arc(ball.x, ball.y, BALL_R + 5 + ratio * 9, 0, Math.PI * 2);
-  ctx.stroke();
+  ctx.strokeStyle = col; ctx.lineWidth = 2.5; ctx.globalAlpha = 0.75;
+  ctx.beginPath(); ctx.arc(ball.x, ball.y, BALL_R + 5 + ratio * 9, 0, Math.PI * 2); ctx.stroke();
   ctx.globalAlpha = 1;
-
-  // Drag ghost line
-  ctx.strokeStyle = 'rgba(255,255,255,0.18)';
-  ctx.lineWidth = 1;
-  ctx.setLineDash([3, 6]);
-  ctx.beginPath();
-  ctx.moveTo(ball.x, ball.y);
-  ctx.lineTo(dragCurrent.x, dragCurrent.y);
-  ctx.stroke();
+  ctx.strokeStyle = 'rgba(255,255,255,0.18)'; ctx.lineWidth = 1; ctx.setLineDash([3, 6]);
+  ctx.beginPath(); ctx.moveTo(ball.x, ball.y); ctx.lineTo(dragCurrent.x, dragCurrent.y); ctx.stroke();
   ctx.setLineDash([]);
   ctx.restore();
 }
 
+// ── HUD ──────────────────────────────────────────────────────────────────────
 function drawHUD() {
-  const h = HOLES[holeIdx];
-  const curShots = holeShots[holeIdx] || 0;
-  const runTotal = holeShots.reduce((a, b) => a + b, 0);
+  const h       = HOLES[holeIdx];
+  const curShots = cp().shots[holeIdx] || 0;
+  const runTotal = cp().shots.reduce((a, b) => a + b, 0);
+  const p0total  = players[0].shots.reduce((a, b) => a + b, 0);
+  const p1total  = players[1].shots.reduce((a, b) => a + b, 0);
 
   // HUD bar
   ctx.fillStyle = '#0a0a22';
   ctx.fillRect(0, 0, LW, CY - 1);
-  ctx.strokeStyle = '#22225a';
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(0, CY - 1); ctx.lineTo(LW, CY - 1);
-  ctx.stroke();
+  ctx.strokeStyle = '#22225a'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(0, CY - 1); ctx.lineTo(LW, CY - 1); ctx.stroke();
 
-  // Title
-  ctx.shadowColor = '#00ffcc';
-  ctx.shadowBlur = 10;
-  ctx.font = 'bold 21px Courier New';
-  ctx.fillStyle = '#00ffcc';
+  // Current player indicator — coloured pill on left
+  const col = playerColor();
+  ctx.shadowColor = col; ctx.shadowBlur = 12;
+  ctx.fillStyle = col + '22';
+  ctx.beginPath(); ctx.roundRect(12, 6, 198, 46, 8); ctx.fill();
+  ctx.strokeStyle = col; ctx.lineWidth = 1.5; ctx.stroke();
+  ctx.shadowBlur = 0;
+
+  ctx.fillStyle = col;
+  ctx.font = 'bold 15px Courier New';
   ctx.textAlign = 'left';
-  ctx.fillText('\u26F3 NEON PUTT', 22, 34);
-  ctx.shadowBlur = 0;
+  const short = cp().name.length > 10 ? cp().name.slice(0, 10) + '…' : cp().name;
+  ctx.fillText('▶ ' + short, 20, 28);
 
-  ctx.font = '13px Courier New';
+  ctx.font = '12px Courier New';
   ctx.fillStyle = '#7070bb';
-  ctx.fillText(`Hole ${holeIdx + 1}/9: ${h.name}`, 22, 56);
+  ctx.fillText(`Shots: ${curShots}  |  Total: ${runTotal}`, 20, 46);
 
-  // Right stats
+  // Hole info — centre
+  ctx.shadowColor = '#00ffcc'; ctx.shadowBlur = 8;
+  ctx.font = 'bold 16px Courier New';
+  ctx.fillStyle = '#00ffcc';
+  ctx.textAlign = 'center';
+  ctx.fillText(`H${holeIdx + 1}/9: ${h.name}`, LW / 2, 26);
+  ctx.shadowBlur = 0;
+  ctx.font = '12px Courier New';
+  ctx.fillStyle = '#7070bb';
+  ctx.fillText(`Par ${h.par}`, LW / 2, 44);
+
+  // Both players' totals — top right
   ctx.textAlign = 'right';
-  ctx.shadowColor = '#ff00cc';
-  ctx.shadowBlur = 8;
-  ctx.font = 'bold 19px Courier New';
-  ctx.fillStyle = '#ff00cc';
-  ctx.fillText(`PAR ${h.par}`, LW - 22, 34);
-  ctx.shadowBlur = 0;
-  ctx.font = '13px Courier New';
-  ctx.fillStyle = '#7070bb';
-  ctx.fillText(`Shots: ${curShots}  |  Total: ${runTotal}`, LW - 22, 56);
+  ctx.font = '12px Courier New';
+  ctx.fillStyle = PLAYER_COLORS[0];
+  ctx.fillText(`${players[0].name.slice(0,8)}: ${p0total}`, LW - 16, 24);
+  ctx.fillStyle = PLAYER_COLORS[1];
+  ctx.fillText(`${players[1].name.slice(0,8)}: ${p1total}`, LW - 16, 42);
 
   // Hole progress dots
-  const dotY = 74;
-  const dotSpacing = 20;
-  const startDotX = LW / 2 - (HOLES.length - 1) * dotSpacing / 2;
+  const dotY = 74, dotSp = 20;
+  const startDotX = LW / 2 - (HOLES.length - 1) * dotSp / 2;
   for (let i = 0; i < HOLES.length; i++) {
-    const dx = startDotX + i * dotSpacing;
+    const dx = startDotX + i * dotSp;
     if (i < holeIdx) ctx.fillStyle = '#00ffcc';
-    else if (i === holeIdx) ctx.fillStyle = '#ff00cc';
+    else if (i === holeIdx) ctx.fillStyle = col;
     else ctx.fillStyle = '#2a2a55';
-    ctx.beginPath();
-    ctx.arc(dx, dotY, 5, 0, Math.PI * 2);
-    ctx.fill();
+    ctx.beginPath(); ctx.arc(dx, dotY, 5, 0, Math.PI * 2); ctx.fill();
   }
   ctx.textAlign = 'left';
 
-  // Drag hint when ball is stopped
   if (ballStopped && !ballInHole && !isDragging) {
     ctx.font = '12px Courier New';
     ctx.fillStyle = '#ffffff28';
     ctx.textAlign = 'center';
-    ctx.fillText('Drag from ball \u2192 release to shoot', LW / 2, LH - 10);
+    ctx.fillText('Drag from ball → release to shoot', LW / 2, LH - 10);
     ctx.textAlign = 'left';
   }
 }
 
-function drawTitleScreen() {
-  ctx.fillStyle = '#070718';
-  ctx.fillRect(0, 0, LW, LH);
-  drawStars();
-
-  ctx.save();
-  ctx.shadowColor = '#00ffcc';
-  ctx.shadowBlur = 35;
-  ctx.font = 'bold 62px Courier New';
-  ctx.fillStyle = '#00ffcc';
-  ctx.textAlign = 'center';
-  ctx.fillText('\u26F3 NEON PUTT', LW / 2, LH / 2 - 90);
-  ctx.restore();
-
-  ctx.font = '19px Courier New';
-  ctx.fillStyle = '#8080cc';
-  ctx.textAlign = 'center';
-  ctx.fillText('9 Holes of Cyberpunk Mini Golf', LW / 2, LH / 2 - 38);
-
-  ctx.font = '14px Courier New';
-  ctx.fillStyle = '#ff00cc99';
-  ctx.fillText('Drag from the ball to aim \u2014 pull back to charge power', LW / 2, LH / 2 + 12);
-  ctx.fillText('Release to shoot! Fewer shots = better score', LW / 2, LH / 2 + 36);
-
-  if (Math.floor(blinkTimer / 34) % 2 === 0) {
-    ctx.font = 'bold 17px Courier New';
-    ctx.fillStyle = '#ffcc00';
-    ctx.fillText('\u25B6  PRESS ANY KEY or CLICK TO START  \u25C0', LW / 2, LH / 2 + 88);
-  }
-
-  if (highScore !== null) {
-    ctx.font = '15px Courier New';
-    ctx.fillStyle = '#00ffcc';
-    ctx.fillText(`Best Score: ${highScore} shots  (Par ${TOTAL_PAR})`, LW / 2, LH / 2 + 135);
-  }
-}
-
+// ── HOLE COMPLETE OVERLAY ────────────────────────────────────────────────────
 function drawHoleCompleteOverlay() {
-  const h = HOLES[holeIdx];
-  const shots = holeShots[holeIdx];
-  const diff = shots - h.par;
+  const h    = HOLES[holeIdx];
+  const pIdx = currentPlayer; // who just finished (before advanceAfterHole)
+  // We need the previous player — currentPlayer is still set to who just played
+  const shots = players[pIdx].shots[holeIdx];
+  const diff  = shots - h.par;
+  const col   = playerColor(pIdx);
 
   const RESULTS = [
     ['HOLE IN ONE!', '#ffdd00'],
@@ -679,7 +704,7 @@ function drawHoleCompleteOverlay() {
     ['PAR',          '#a0a0ff'],
     ['BOGEY',        '#ff8844'],
     ['DOUBLE BOGEY', '#ff5522'],
-    ['TRIPLE BOGEY', '#ff3300'],
+    ['TRIPLE+',      '#ff3300'],
   ];
   let ri;
   if (shots === 1) ri = 0;
@@ -689,118 +714,188 @@ function drawHoleCompleteOverlay() {
   else if (diff === 1) ri = 4;
   else if (diff === 2) ri = 5;
   else ri = 6;
-  const [msg, col] = RESULTS[Math.min(ri, RESULTS.length - 1)];
+  const [msg, msgCol] = RESULTS[Math.min(ri, RESULTS.length - 1)];
 
-  ctx.fillStyle = 'rgba(7,7,24,0.72)';
+  ctx.fillStyle = 'rgba(7,7,24,0.78)';
   ctx.fillRect(0, 0, LW, LH);
   drawParticles();
 
-  const pulse = Math.sin(stateTimer * 0.09) * 0.12 + 0.88;
+  // Player name banner
   ctx.save();
-  ctx.shadowColor = col;
-  ctx.shadowBlur = 22;
-  ctx.font = `bold ${Math.round(52 * pulse)}px Courier New`;
+  ctx.shadowColor = col; ctx.shadowBlur = 16;
+  ctx.font = 'bold 18px Courier New';
   ctx.fillStyle = col;
   ctx.textAlign = 'center';
-  ctx.fillText(msg, LW / 2, LH / 2 - 42);
+  ctx.fillText(players[pIdx].name.toUpperCase(), LW / 2, LH / 2 - 92);
   ctx.restore();
 
-  ctx.font = '20px Courier New';
+  // Score label
+  const pulse = Math.sin(stateTimer * 0.09) * 0.12 + 0.88;
+  ctx.save();
+  ctx.shadowColor = msgCol; ctx.shadowBlur = 22;
+  ctx.font = `bold ${Math.round(50 * pulse)}px Courier New`;
+  ctx.fillStyle = msgCol;
+  ctx.textAlign = 'center';
+  ctx.fillText(msg, LW / 2, LH / 2 - 38);
+  ctx.restore();
+
+  ctx.font = '19px Courier New';
   ctx.fillStyle = '#a0a0ff';
   ctx.textAlign = 'center';
-  ctx.fillText(`${shots} shot${shots !== 1 ? 's' : ''}  on  Par ${h.par}`, LW / 2, LH / 2 + 18);
+  ctx.fillText(`${shots} shot${shots !== 1 ? 's' : ''}  on  Par ${h.par}`, LW / 2, LH / 2 + 20);
 
+  // "Next" hint
   if (Math.floor(blinkTimer / 30) % 2 === 0) {
-    const nextLabel = holeIdx + 1 < HOLES.length ? 'Click for next hole \u2192' : 'Click for final score!';
+    let nextLabel;
+    if (pIdx === 0) {
+      const n2 = players[1].name;
+      nextLabel = `Click for ${n2}'s turn →`;
+    } else {
+      nextLabel = holeIdx + 1 < HOLES.length ? 'Click for next hole →' : 'Click for final scores!';
+    }
     ctx.font = '15px Courier New';
     ctx.fillStyle = '#ffcc00';
-    ctx.fillText(nextLabel, LW / 2, LH / 2 + 68);
+    ctx.textAlign = 'center';
+    ctx.fillText(nextLabel, LW / 2, LH / 2 + 72);
   }
 }
 
+// ── GAME OVER SCREEN ─────────────────────────────────────────────────────────
 function drawGameOverScreen() {
   ctx.fillStyle = '#070718';
   ctx.fillRect(0, 0, LW, LH);
   drawStars();
   drawParticles();
 
+  const t0 = players[0].shots.reduce((a, b) => a + b, 0);
+  const t1 = players[1].shots.reduce((a, b) => a + b, 0);
+  const winner = t0 < t1 ? 0 : t1 < t0 ? 1 : -1; // -1 = tie
+
+  // Title
   ctx.save();
-  ctx.shadowColor = '#ff00cc';
-  ctx.shadowBlur = 28;
-  ctx.font = 'bold 46px Courier New';
+  ctx.shadowColor = '#ff00cc'; ctx.shadowBlur = 26;
+  ctx.font = 'bold 36px Courier New';
   ctx.fillStyle = '#ff00cc';
   ctx.textAlign = 'center';
-  ctx.fillText('ROUND COMPLETE!', LW / 2, LH / 2 - 130);
+  ctx.fillText('ROUND COMPLETE!', LW / 2, 46);
   ctx.restore();
 
-  const diff = totalShots - TOTAL_PAR;
-  const diffStr = diff === 0 ? 'EVEN PAR!' : diff < 0 ? `${Math.abs(diff)} UNDER PAR!` : `${diff} OVER PAR`;
-  const diffCol = diff < 0 ? '#00ffcc' : diff === 0 ? '#ffdd00' : '#ff5544';
-
-  ctx.save();
-  ctx.shadowColor = diffCol;
-  ctx.shadowBlur = 14;
-  ctx.font = 'bold 28px Courier New';
-  ctx.fillStyle = diffCol;
-  ctx.textAlign = 'center';
-  ctx.fillText(diffStr, LW / 2, LH / 2 - 75);
-  ctx.restore();
-
-  ctx.font = '20px Courier New';
-  ctx.fillStyle = '#a0a0ff';
-  ctx.textAlign = 'center';
-  ctx.fillText(`Total Shots: ${totalShots}   Par: ${TOTAL_PAR}`, LW / 2, LH / 2 - 30);
-
-  if (highScore !== null) {
-    ctx.font = '15px Courier New';
-    ctx.fillStyle = '#00ffcc';
-    ctx.fillText(`Best Score: ${highScore}`, LW / 2, LH / 2 + 5);
+  // Winner banner
+  if (winner === -1) {
+    ctx.font = 'bold 22px Courier New';
+    ctx.fillStyle = '#ffdd00';
+    ctx.textAlign = 'center';
+    ctx.fillText("IT'S A TIE! 🤝", LW / 2, 82);
+  } else {
+    const wcol = playerColor(winner);
+    ctx.save();
+    ctx.shadowColor = wcol; ctx.shadowBlur = 14;
+    ctx.font = 'bold 19px Courier New';
+    ctx.fillStyle = wcol;
+    ctx.textAlign = 'center';
+    const margin = Math.abs(t0 - t1);
+    ctx.fillText(
+      `🏆 ${players[winner].name} wins by ${margin} shot${margin !== 1 ? 's' : ''}!`,
+      LW / 2, 82
+    );
+    ctx.restore();
   }
 
-  // Scorecard grid
-  const cols = 3, rows = Math.ceil(HOLES.length / cols);
+  // ── Scorecard table ──
+  const COL_X  = [90, 290, 430, 570]; // hole | p1 | p2 | par
+  const ROW_Y0 = 122;
+  const ROW_H  = 20;
+
+  // Header row
+  ctx.font = 'bold 12px Courier New';
+  ctx.fillStyle = '#7070bb'; ctx.textAlign = 'center';
+  ctx.fillText('HOLE',            COL_X[0], ROW_Y0);
+  ctx.fillStyle = PLAYER_COLORS[0];
+  const p0head = players[0].name.slice(0, 9);
+  ctx.fillText(p0head,            COL_X[1], ROW_Y0);
+  ctx.fillStyle = PLAYER_COLORS[1];
+  const p1head = players[1].name.slice(0, 9);
+  ctx.fillText(p1head,            COL_X[2], ROW_Y0);
+  ctx.fillStyle = '#7070bb';
+  ctx.fillText('PAR',             COL_X[3], ROW_Y0);
+
+  // Divider
+  ctx.strokeStyle = '#22225a'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(50, ROW_Y0 + 5); ctx.lineTo(LW - 50, ROW_Y0 + 5); ctx.stroke();
+
+  // Data rows
   ctx.font = '12px Courier New';
   for (let i = 0; i < HOLES.length; i++) {
-    const col = i % cols, row = Math.floor(i / cols);
-    const tx = LW / 2 + (col - 1) * 200;
-    const ty = LH / 2 + 44 + row * 22;
-    const d = holeShots[i] - HOLES[i].par;
-    ctx.fillStyle = d < 0 ? '#00ffcc' : d === 0 ? '#8080cc' : '#ff5544';
-    ctx.textAlign = 'center';
-    ctx.fillText(`H${i + 1}: ${holeShots[i]} (${d >= 0 ? '+' : ''}${d})`, tx, ty);
+    const y   = ROW_Y0 + (i + 1) * ROW_H + 6;
+    const s0  = players[0].shots[i];
+    const s1  = players[1].shots[i];
+    const par = HOLES[i].par;
+    const d0  = s0 - par, d1 = s1 - par;
+
+    ctx.fillStyle = '#7070bb'; ctx.textAlign = 'center';
+    ctx.fillText(`H${i + 1}`, COL_X[0], y);
+
+    ctx.fillStyle = d0 < 0 ? '#00ffcc' : d0 === 0 ? '#8080cc' : '#ff5544';
+    ctx.fillText(`${s0} (${d0 >= 0 ? '+' : ''}${d0})`, COL_X[1], y);
+
+    ctx.fillStyle = d1 < 0 ? '#00ffcc' : d1 === 0 ? '#8080cc' : '#ff5544';
+    ctx.fillText(`${s1} (${d1 >= 0 ? '+' : ''}${d1})`, COL_X[2], y);
+
+    ctx.fillStyle = '#7070bb';
+    ctx.fillText(par, COL_X[3], y);
   }
 
-  // Play Again button
-  const bx = LW / 2, by = LH / 2 + 195;
-  ctx.fillStyle = '#ff00cc1a';
-  ctx.strokeStyle = '#ff00cc';
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.roundRect(bx - 108, by - 27, 216, 50, 8);
-  ctx.fill();
-  ctx.stroke();
-  ctx.font = 'bold 17px Courier New';
-  ctx.fillStyle = '#ff00cc';
-  ctx.textAlign = 'center';
-  ctx.fillText('PLAY AGAIN', bx, by + 2);
+  // Totals row
+  const ty  = ROW_Y0 + (HOLES.length + 1) * ROW_H + 10;
+  ctx.strokeStyle = '#22225a'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(50, ty - 8); ctx.lineTo(LW - 50, ty - 8); ctx.stroke();
+
+  ctx.font = 'bold 13px Courier New'; ctx.textAlign = 'center';
+  ctx.fillStyle = '#7070bb';
+  ctx.fillText('TOTAL', COL_X[0], ty);
+  ctx.fillStyle = winner === 0 ? '#00ffcc' : PLAYER_COLORS[0];
+  ctx.fillText(t0, COL_X[1], ty);
+  ctx.fillStyle = winner === 1 ? '#ff00cc' : PLAYER_COLORS[1];
+  ctx.fillText(t1, COL_X[2], ty);
+  ctx.fillStyle = '#7070bb';
+  ctx.fillText(TOTAL_PAR, COL_X[3], ty);
+
+  // ── Buttons ──
+  const by = LH / 2 + 185;
+
+  // Play again (same names)
+  const b1x = LW / 2 - 120;
+  ctx.fillStyle = '#00ffcc1a'; ctx.strokeStyle = '#00ffcc'; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.roundRect(b1x - 95, by - 26, 190, 46, 8); ctx.fill(); ctx.stroke();
+  ctx.font = 'bold 14px Courier New'; ctx.fillStyle = '#00ffcc'; ctx.textAlign = 'center';
+  ctx.fillText('PLAY AGAIN', b1x, by + 2);
+
+  // Change players
+  const b2x = LW / 2 + 120;
+  ctx.fillStyle = '#ff00cc1a'; ctx.strokeStyle = '#ff00cc'; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.roundRect(b2x - 95, by - 26, 190, 46, 8); ctx.fill(); ctx.stroke();
+  ctx.font = 'bold 14px Courier New'; ctx.fillStyle = '#ff00cc'; ctx.textAlign = 'center';
+  ctx.fillText('CHANGE PLAYERS', b2x, by + 2);
 
   if (Math.floor(blinkTimer / 34) % 2 === 0) {
-    ctx.font = '13px Courier New';
-    ctx.fillStyle = '#ffcc0088';
-    ctx.fillText('or press any key', bx, by + 38);
+    ctx.font = '12px Courier New'; ctx.fillStyle = '#ffcc0066'; ctx.textAlign = 'center';
+    ctx.fillText('or press any key to change players', LW / 2, by + 36);
   }
 }
 
-// ── RENDER FRAME ───────────────────────────────────────────────────────────
+// ── RENDER FRAME ─────────────────────────────────────────────────────────────
 function draw() {
   ctx.save();
   ctx.scale(scale, scale);
 
-  if (STATE === 'title') {
-    drawTitleScreen();
+  if (STATE === 'idle') {
+    // Show a holding screen while nameScreen is visible
+    ctx.fillStyle = '#070718';
+    ctx.fillRect(0, 0, LW, LH);
     ctx.restore();
     return;
   }
+
   if (STATE === 'gameOver') {
     drawGameOverScreen();
     ctx.restore();
@@ -824,16 +919,16 @@ function draw() {
   ctx.restore();
 }
 
-// ── RESIZE ─────────────────────────────────────────────────────────────────
+// ── RESIZE ────────────────────────────────────────────────────────────────────
 function resize() {
   scale = Math.min(window.innerWidth / LW, window.innerHeight / LH) * 0.97;
-  canvas.width = Math.round(LW * scale);
+  canvas.width  = Math.round(LW * scale);
   canvas.height = Math.round(LH * scale);
 }
 resize();
 window.addEventListener('resize', resize);
 
-// ── MAIN LOOP ──────────────────────────────────────────────────────────────
+// ── MAIN LOOP ─────────────────────────────────────────────────────────────────
 function loop() {
   update();
   draw();
