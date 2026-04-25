@@ -1,0 +1,809 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Lantern Labyrinth</title>
+<style>
+  :root {
+    --bg: #07111c;
+    --bg2: #0b1b2a;
+    --ink: #e8f4ff;
+    --amber: #ffd07a;
+    --amber2: #ffb347;
+    --teal: #2c6f7a;
+    --mint: #a8e6cf;
+    --magenta: #c27bd9;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    width: 100%; height: 100%;
+    background: radial-gradient(ellipse at center, var(--bg2) 0%, var(--bg) 100%);
+    color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    overflow: hidden;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  #wrap {
+    position: fixed; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+  }
+  canvas {
+    display: block;
+    background: #07111c;
+    box-shadow: 0 0 80px rgba(255, 208, 122, 0.08), 0 0 2px rgba(168, 230, 207, 0.2) inset;
+    border-radius: 10px;
+    touch-action: none;
+  }
+  .hint {
+    position: fixed;
+    bottom: 10px; left: 50%;
+    transform: translateX(-50%);
+    font-size: 12px;
+    color: rgba(232, 244, 255, 0.4);
+    letter-spacing: 1px;
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game"></canvas>
+</div>
+<div class="hint">Arrow keys / WASD · swipe on touch · click PLAY AGAIN after losing</div>
+
+<script>
+// Genre: Maze | Date: 2026-04-21
+(function () {
+  "use strict";
+
+  // ---------- roundRect polyfill ----------
+  if (!CanvasRenderingContext2D.prototype.roundRect) {
+    CanvasRenderingContext2D.prototype.roundRect = function (x, y, w, h, r) {
+      if (typeof r === "number") r = { tl: r, tr: r, br: r, bl: r };
+      else r = Object.assign({ tl: 0, tr: 0, br: 0, bl: 0 }, r);
+      this.beginPath();
+      this.moveTo(x + r.tl, y);
+      this.lineTo(x + w - r.tr, y);
+      this.quadraticCurveTo(x + w, y, x + w, y + r.tr);
+      this.lineTo(x + w, y + h - r.br);
+      this.quadraticCurveTo(x + w, y + h, x + w - r.br, y + h);
+      this.lineTo(x + r.bl, y + h);
+      this.quadraticCurveTo(x, y + h, x, y + h - r.bl);
+      this.lineTo(x, y + r.tl);
+      this.quadraticCurveTo(x, y, x + r.tl, y);
+      this.closePath();
+      return this;
+    };
+  }
+
+  // ---------- Setup ----------
+  const canvas = document.getElementById("game");
+  const ctx = canvas.getContext("2d");
+
+  // Logical (CSS) size — we will fit to window while keeping aspect
+  const LOGICAL_W = 800;
+  const LOGICAL_H = 600;
+  let dpr = Math.max(1, Math.min(window.devicePixelRatio || 1, 2));
+  let viewScale = 1;
+
+  function resize() {
+    dpr = Math.max(1, Math.min(window.devicePixelRatio || 1, 2));
+    const availW = window.innerWidth - 20;
+    const availH = window.innerHeight - 40;
+    viewScale = Math.min(availW / LOGICAL_W, availH / LOGICAL_H);
+    const cssW = Math.floor(LOGICAL_W * viewScale);
+    const cssH = Math.floor(LOGICAL_H * viewScale);
+    canvas.style.width = cssW + "px";
+    canvas.style.height = cssH + "px";
+    canvas.width = Math.floor(cssW * dpr);
+    canvas.height = Math.floor(cssH * dpr);
+  }
+  window.addEventListener("resize", resize);
+  resize();
+
+  // ---------- State ----------
+  const STATE = { TITLE: 0, PLAY: 1, LEVEL_DONE: 2, OVER: 3 };
+  let state = STATE.TITLE;
+  let blinkT = 0;
+  let runTime = 0;
+
+  const keys = Object.create(null);
+  window.addEventListener("keydown", (e) => {
+    keys[e.key.toLowerCase()] = true;
+    if ([" ", "arrowup", "arrowdown", "arrowleft", "arrowright"].includes(e.key.toLowerCase()) || e.key === " ") e.preventDefault();
+    if (state === STATE.TITLE) startGame();
+    else if (state === STATE.OVER) {
+      // any key restarts after over
+      resetAll(); startGame();
+    } else if (state === STATE.LEVEL_DONE) {
+      nextLevel();
+    }
+  }, { passive: false });
+  window.addEventListener("keyup", (e) => { keys[e.key.toLowerCase()] = false; });
+
+  // touch / mouse
+  let touchStart = null;
+  function logicalPoint(clientX, clientY) {
+    const rect = canvas.getBoundingClientRect();
+    const x = (clientX - rect.left) * (LOGICAL_W / rect.width);
+    const y = (clientY - rect.top) * (LOGICAL_H / rect.height);
+    return { x, y };
+  }
+  canvas.addEventListener("pointerdown", (e) => {
+    const p = logicalPoint(e.clientX, e.clientY);
+    if (state === STATE.TITLE) { startGame(); return; }
+    if (state === STATE.OVER) {
+      // Play again button test
+      if (playAgainBtn && pointInRect(p, playAgainBtn)) {
+        resetAll(); startGame();
+        return;
+      }
+      resetAll(); startGame();
+      return;
+    }
+    if (state === STATE.LEVEL_DONE) { nextLevel(); return; }
+    touchStart = p;
+  });
+  canvas.addEventListener("pointermove", (e) => {
+    if (!touchStart) return;
+    const p = logicalPoint(e.clientX, e.clientY);
+    const dx = p.x - touchStart.x;
+    const dy = p.y - touchStart.y;
+    const thresh = 24;
+    if (Math.abs(dx) > thresh || Math.abs(dy) > thresh) {
+      if (Math.abs(dx) > Math.abs(dy)) queuedDir = dx > 0 ? "right" : "left";
+      else queuedDir = dy > 0 ? "down" : "up";
+      touchStart = p; // re-anchor to allow continuous swipes
+    }
+  });
+  canvas.addEventListener("pointerup", () => { touchStart = null; });
+  canvas.addEventListener("pointercancel", () => { touchStart = null; });
+
+  function pointInRect(p, r) { return p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h; }
+
+  // ---------- Maze ----------
+  // Grid of cells with walls N,S,E,W
+  let grid = [];
+  let cols = 0, rows = 0;
+  let cellSize = 0;
+  let offsetX = 0, offsetY = 0;
+  let player = { cx: 0, cy: 0, x: 0, y: 0, dirX: 0, dirY: 0 };
+  let queuedDir = null;
+  let fireflies = [];
+  let portal = null;
+  let portalActive = false;
+  let level = 1;
+  let score = 0;
+  let levelStartMs = 0;
+  let levelTimeMs = 0;
+
+  let highScore = 0;
+  try {
+    // per spec we avoid browser storage APIs; just keep in-memory
+    highScore = 0;
+  } catch (e) {}
+
+  // Background stars (twinkle)
+  const stars = [];
+  for (let i = 0; i < 80; i++) {
+    stars.push({
+      x: Math.random() * LOGICAL_W,
+      y: Math.random() * LOGICAL_H,
+      r: Math.random() * 1.4 + 0.2,
+      t: Math.random() * Math.PI * 2,
+      s: 0.5 + Math.random() * 1.5,
+    });
+  }
+
+  // Particles (sparks)
+  const particles = [];
+  function spawnSpark(x, y, color) {
+    for (let i = 0; i < 14; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const sp = 30 + Math.random() * 90;
+      particles.push({
+        x, y,
+        vx: Math.cos(a) * sp,
+        vy: Math.sin(a) * sp,
+        life: 0.6 + Math.random() * 0.4,
+        age: 0,
+        color,
+        size: 1 + Math.random() * 2.2,
+      });
+    }
+  }
+
+  function makeGrid(c, r) {
+    const g = new Array(c * r);
+    for (let y = 0; y < r; y++) {
+      for (let x = 0; x < c; x++) {
+        g[y * c + x] = { x, y, n: true, s: true, e: true, w: true, visited: false };
+      }
+    }
+    return g;
+  }
+
+  function carveMaze(c, r) {
+    const g = makeGrid(c, r);
+    const stack = [];
+    const start = g[0];
+    start.visited = true;
+    stack.push(start);
+    while (stack.length) {
+      const cur = stack[stack.length - 1];
+      const neighbors = [];
+      if (cur.y > 0 && !g[(cur.y - 1) * c + cur.x].visited) neighbors.push(["n", g[(cur.y - 1) * c + cur.x]]);
+      if (cur.y < r - 1 && !g[(cur.y + 1) * c + cur.x].visited) neighbors.push(["s", g[(cur.y + 1) * c + cur.x]]);
+      if (cur.x > 0 && !g[cur.y * c + (cur.x - 1)].visited) neighbors.push(["w", g[cur.y * c + (cur.x - 1)]]);
+      if (cur.x < c - 1 && !g[cur.y * c + (cur.x + 1)].visited) neighbors.push(["e", g[cur.y * c + (cur.x + 1)]]);
+      if (neighbors.length === 0) { stack.pop(); continue; }
+      const [dir, nb] = neighbors[Math.floor(Math.random() * neighbors.length)];
+      if (dir === "n") { cur.n = false; nb.s = false; }
+      if (dir === "s") { cur.s = false; nb.n = false; }
+      if (dir === "e") { cur.e = false; nb.w = false; }
+      if (dir === "w") { cur.w = false; nb.e = false; }
+      nb.visited = true;
+      stack.push(nb);
+    }
+    return g;
+  }
+
+  function layoutLevel() {
+    // Grow difficulty by level
+    cols = Math.min(8 + Math.floor(level * 1.5), 22);
+    rows = Math.min(6 + Math.floor(level * 1.2), 17);
+    // Fit to play area
+    const playW = LOGICAL_W - 40;
+    const playH = LOGICAL_H - 120; // leave room for HUD
+    cellSize = Math.floor(Math.min(playW / cols, playH / rows));
+    offsetX = Math.floor((LOGICAL_W - cols * cellSize) / 2);
+    offsetY = 80 + Math.floor((playH - rows * cellSize) / 2);
+
+    grid = carveMaze(cols, rows);
+
+    player.cx = 0; player.cy = 0;
+    player.x = cellCenterX(0);
+    player.y = cellCenterY(0);
+    player.dirX = 0; player.dirY = 0;
+    queuedDir = null;
+
+    // place fireflies
+    fireflies = [];
+    const fireflyCount = Math.min(3 + level, 8);
+    const taken = new Set();
+    taken.add("0,0");
+    while (fireflies.length < fireflyCount) {
+      const fx = Math.floor(Math.random() * cols);
+      const fy = Math.floor(Math.random() * rows);
+      const key = fx + "," + fy;
+      if (taken.has(key)) continue;
+      if (Math.abs(fx) + Math.abs(fy) < 3) continue; // not too close to start
+      taken.add(key);
+      fireflies.push({
+        cx: fx, cy: fy,
+        x: cellCenterX(fx),
+        y: cellCenterY(fy),
+        t: Math.random() * Math.PI * 2,
+        bob: Math.random() * 0.4 + 0.8,
+        collected: false,
+      });
+    }
+
+    // portal at far corner (not always bottom-right; pick a far empty cell)
+    portal = { cx: cols - 1, cy: rows - 1, x: cellCenterX(cols - 1), y: cellCenterY(rows - 1), t: 0 };
+    portalActive = false;
+
+    levelStartMs = performance.now();
+  }
+
+  function cellCenterX(cx) { return offsetX + cx * cellSize + cellSize / 2; }
+  function cellCenterY(cy) { return offsetY + cy * cellSize + cellSize / 2; }
+
+  function canMove(cx, cy, dir) {
+    if (cx < 0 || cy < 0 || cx >= cols || cy >= rows) return false;
+    const c = grid[cy * cols + cx];
+    if (dir === "up") return !c.n;
+    if (dir === "down") return !c.s;
+    if (dir === "left") return !c.w;
+    if (dir === "right") return !c.e;
+    return false;
+  }
+
+  // ---------- Game flow ----------
+  function startGame() {
+    state = STATE.PLAY;
+    level = 1;
+    score = 0;
+    runTime = 0;
+    layoutLevel();
+  }
+  function resetAll() {
+    state = STATE.TITLE;
+  }
+  function nextLevel() {
+    level++;
+    layoutLevel();
+    state = STATE.PLAY;
+  }
+  function finishLevel() {
+    levelTimeMs = performance.now() - levelStartMs;
+    const tBonus = Math.max(0, 2000 - Math.floor(levelTimeMs));
+    score += 500 + tBonus;
+    if (score > highScore) highScore = score;
+    state = STATE.LEVEL_DONE;
+  }
+  function endRun() {
+    if (score > highScore) highScore = score;
+    state = STATE.OVER;
+  }
+
+  // ---------- Update ----------
+  const MOVE_SPEED_CELLS_PER_SEC = 5.5; // cells/second
+  let moveCooldown = 0;
+
+  function update(dt) {
+    runTime += dt;
+    blinkT += dt;
+
+    // stars twinkle
+    for (const s of stars) s.t += dt * s.s;
+    // particles
+    for (let i = particles.length - 1; i >= 0; i--) {
+      const p = particles[i];
+      p.age += dt;
+      if (p.age >= p.life) { particles.splice(i, 1); continue; }
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.vx *= 0.92;
+      p.vy *= 0.92;
+    }
+
+    if (state !== STATE.PLAY) return;
+
+    // firefly bob
+    for (const f of fireflies) f.t += dt * f.bob * 2;
+    if (portal) portal.t += dt * 2;
+
+    // input direction
+    let want = null;
+    if (keys["arrowup"] || keys["w"]) want = "up";
+    else if (keys["arrowdown"] || keys["s"]) want = "down";
+    else if (keys["arrowleft"] || keys["a"]) want = "left";
+    else if (keys["arrowright"] || keys["d"]) want = "right";
+    if (queuedDir) { want = queuedDir; queuedDir = null; }
+
+    // smooth grid movement: only accept input at cell centers
+    const cx = player.cx, cy = player.cy;
+    const centerX = cellCenterX(cx);
+    const centerY = cellCenterY(cy);
+    const atCenter = Math.abs(player.x - centerX) < 1 && Math.abs(player.y - centerY) < 1;
+
+    if (atCenter) {
+      player.x = centerX; player.y = centerY;
+      player.dirX = 0; player.dirY = 0;
+
+      if (want && canMove(cx, cy, want)) {
+        if (want === "up") { player.dirY = -1; player.cy = cy - 1; }
+        else if (want === "down") { player.dirY = 1; player.cy = cy + 1; }
+        else if (want === "left") { player.dirX = -1; player.cx = cx - 1; }
+        else if (want === "right") { player.dirX = 1; player.cx = cx + 1; }
+      }
+    }
+
+    // move toward target cell center
+    const targetX = cellCenterX(player.cx);
+    const targetY = cellCenterY(player.cy);
+    const speed = MOVE_SPEED_CELLS_PER_SEC * cellSize * dt;
+    if (player.x < targetX) player.x = Math.min(targetX, player.x + speed);
+    else if (player.x > targetX) player.x = Math.max(targetX, player.x - speed);
+    if (player.y < targetY) player.y = Math.min(targetY, player.y + speed);
+    else if (player.y > targetY) player.y = Math.max(targetY, player.y - speed);
+
+    // firefly pickups
+    for (const f of fireflies) {
+      if (f.collected) continue;
+      if (f.cx === player.cx && f.cy === player.cy) {
+        const dx = f.x - player.x, dy = f.y - player.y;
+        if (dx * dx + dy * dy < (cellSize * 0.45) ** 2) {
+          f.collected = true;
+          score += 100;
+          spawnSpark(f.x, f.y, "#a8e6cf");
+        }
+      }
+    }
+
+    // portal activates when all fireflies collected
+    if (!portalActive && fireflies.every((f) => f.collected)) {
+      portalActive = true;
+      spawnSpark(portal.x, portal.y, "#c27bd9");
+    }
+
+    // reach portal
+    if (portalActive && player.cx === portal.cx && player.cy === portal.cy) {
+      const dx = portal.x - player.x, dy = portal.y - player.y;
+      if (dx * dx + dy * dy < (cellSize * 0.4) ** 2) {
+        spawnSpark(portal.x, portal.y, "#c27bd9");
+        spawnSpark(portal.x, portal.y, "#ffd07a");
+        finishLevel();
+      }
+    }
+  }
+
+  // ---------- Draw ----------
+  let playAgainBtn = null;
+
+  function clear() {
+    ctx.setTransform(dpr * viewScale, 0, 0, dpr * viewScale, 0, 0);
+    // background gradient
+    const g = ctx.createRadialGradient(LOGICAL_W / 2, LOGICAL_H / 2, 50, LOGICAL_W / 2, LOGICAL_H / 2, Math.max(LOGICAL_W, LOGICAL_H) * 0.75);
+    g.addColorStop(0, "#0b1b2a");
+    g.addColorStop(1, "#050a12");
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, LOGICAL_W, LOGICAL_H);
+
+    // stars
+    for (const s of stars) {
+      const tw = 0.5 + 0.5 * Math.sin(s.t);
+      ctx.globalAlpha = 0.35 + 0.45 * tw;
+      ctx.fillStyle = "#cfe6ff";
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function drawMaze() {
+    // subtle floor
+    ctx.fillStyle = "rgba(44, 111, 122, 0.08)";
+    ctx.fillRect(offsetX, offsetY, cols * cellSize, rows * cellSize);
+
+    // walls
+    ctx.strokeStyle = "#2a5b6b";
+    ctx.lineWidth = Math.max(2, cellSize * 0.09);
+    ctx.lineCap = "round";
+    ctx.shadowColor = "rgba(168, 230, 207, 0.25)";
+    ctx.shadowBlur = 6;
+    ctx.beginPath();
+    for (let y = 0; y < rows; y++) {
+      for (let x = 0; x < cols; x++) {
+        const c = grid[y * cols + x];
+        const px = offsetX + x * cellSize;
+        const py = offsetY + y * cellSize;
+        if (c.n) { ctx.moveTo(px, py); ctx.lineTo(px + cellSize, py); }
+        if (c.w) { ctx.moveTo(px, py); ctx.lineTo(px, py + cellSize); }
+        if (y === rows - 1 && c.s) { ctx.moveTo(px, py + cellSize); ctx.lineTo(px + cellSize, py + cellSize); }
+        if (x === cols - 1 && c.e) { ctx.moveTo(px + cellSize, py); ctx.lineTo(px + cellSize, py + cellSize); }
+      }
+    }
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    // cell highlight on portal (and goal marker)
+    if (portal) {
+      const pulse = 0.5 + 0.5 * Math.sin(portal.t);
+      const r = cellSize * (portalActive ? 0.42 : 0.28) * (0.9 + 0.1 * pulse);
+      const gx = portal.x, gy = portal.y;
+      const grad = ctx.createRadialGradient(gx, gy, 1, gx, gy, r * 2.2);
+      if (portalActive) {
+        grad.addColorStop(0, "rgba(194, 123, 217, 0.95)");
+        grad.addColorStop(0.4, "rgba(255, 176, 235, 0.35)");
+        grad.addColorStop(1, "rgba(194, 123, 217, 0)");
+      } else {
+        grad.addColorStop(0, "rgba(120, 90, 140, 0.35)");
+        grad.addColorStop(1, "rgba(120, 90, 140, 0)");
+      }
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.arc(gx, gy, r * 2.2, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.strokeStyle = portalActive ? "#f3c8ff" : "rgba(200, 160, 220, 0.35)";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(gx, gy, r, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+  }
+
+  function drawFireflies() {
+    for (const f of fireflies) {
+      if (f.collected) continue;
+      const bob = Math.sin(f.t) * cellSize * 0.08;
+      const fx = f.x, fy = f.y + bob;
+      // glow
+      const glow = ctx.createRadialGradient(fx, fy, 0, fx, fy, cellSize * 0.55);
+      glow.addColorStop(0, "rgba(168, 230, 207, 0.9)");
+      glow.addColorStop(0.4, "rgba(168, 230, 207, 0.25)");
+      glow.addColorStop(1, "rgba(168, 230, 207, 0)");
+      ctx.fillStyle = glow;
+      ctx.beginPath();
+      ctx.arc(fx, fy, cellSize * 0.55, 0, Math.PI * 2);
+      ctx.fill();
+      // body
+      ctx.fillStyle = "#eaffe0";
+      ctx.beginPath();
+      ctx.arc(fx, fy, Math.max(2, cellSize * 0.10), 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  function drawPlayer() {
+    const x = player.x, y = player.y;
+    const r = Math.max(4, cellSize * 0.28);
+    // lantern glow (limited vision feel)
+    const vision = cellSize * 2.8;
+    const vg = ctx.createRadialGradient(x, y, 0, x, y, vision);
+    vg.addColorStop(0, "rgba(255, 208, 122, 0.35)");
+    vg.addColorStop(0.5, "rgba(255, 176, 80, 0.12)");
+    vg.addColorStop(1, "rgba(255, 176, 80, 0)");
+    ctx.fillStyle = vg;
+    ctx.beginPath();
+    ctx.arc(x, y, vision, 0, Math.PI * 2);
+    ctx.fill();
+
+    // lantern body: rounded-rect with handle
+    const lw = r * 1.4, lh = r * 1.8;
+    ctx.save();
+    ctx.translate(x, y);
+    // handle
+    ctx.strokeStyle = "#d7b680";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(0, -lh * 0.5 - 4, r * 0.55, Math.PI, 0);
+    ctx.stroke();
+    // frame
+    ctx.fillStyle = "#2a1f14";
+    ctx.roundRect(-lw / 2, -lh / 2, lw, lh, Math.min(lw, lh) * 0.25);
+    ctx.fill();
+    // glass
+    const gg = ctx.createLinearGradient(0, -lh / 2, 0, lh / 2);
+    gg.addColorStop(0, "#ffe6a8");
+    gg.addColorStop(0.5, "#ffd07a");
+    gg.addColorStop(1, "#ffb347");
+    ctx.fillStyle = gg;
+    ctx.roundRect(-lw / 2 + 2, -lh / 2 + 2, lw - 4, lh - 4, Math.min(lw, lh) * 0.2);
+    ctx.fill();
+    // flicker
+    ctx.globalAlpha = 0.7 + 0.3 * Math.sin(runTime * 12);
+    ctx.fillStyle = "#fff4c4";
+    ctx.beginPath();
+    ctx.arc(0, 0, r * 0.45, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.restore();
+  }
+
+  function drawParticles() {
+    for (const p of particles) {
+      const a = 1 - p.age / p.life;
+      ctx.globalAlpha = a;
+      ctx.fillStyle = p.color;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function drawHUD() {
+    // top bar
+    ctx.fillStyle = "rgba(7, 17, 28, 0.65)";
+    ctx.roundRect(14, 14, LOGICAL_W - 28, 50, 10);
+    ctx.fill();
+
+    ctx.fillStyle = "#e8f4ff";
+    ctx.font = "bold 18px -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
+    ctx.textBaseline = "middle";
+    ctx.textAlign = "left";
+    ctx.fillText("Lantern Labyrinth", 28, 39);
+
+    const remaining = fireflies.filter((f) => !f.collected).length;
+    const t = (performance.now() - levelStartMs) / 1000;
+    const tStr = t.toFixed(1) + "s";
+
+    const stats = [
+      { label: "LEVEL", value: String(level) },
+      { label: "SCORE", value: String(score) },
+      { label: "FIREFLIES", value: remaining + "/" + fireflies.length },
+      { label: "TIME", value: tStr },
+    ];
+    ctx.textAlign = "right";
+    let rx = LOGICAL_W - 28;
+    for (let i = stats.length - 1; i >= 0; i--) {
+      const s = stats[i];
+      ctx.font = "bold 16px -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
+      ctx.fillStyle = "#ffd07a";
+      ctx.fillText(s.value, rx, 33);
+      const vw = ctx.measureText(s.value).width;
+      ctx.font = "11px -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
+      ctx.fillStyle = "rgba(232, 244, 255, 0.6)";
+      ctx.fillText(s.label, rx, 52);
+      const lw = ctx.measureText(s.label).width;
+      rx -= Math.max(vw, lw) + 22;
+    }
+  }
+
+  function drawTitle() {
+    // dim overlay
+    ctx.fillStyle = "rgba(7, 17, 28, 0.55)";
+    ctx.fillRect(0, 0, LOGICAL_W, LOGICAL_H);
+
+    // decorative lantern
+    const cx = LOGICAL_W / 2, cy = 200;
+    const lw = 80, lh = 110;
+    const glow = ctx.createRadialGradient(cx, cy, 10, cx, cy, 260);
+    glow.addColorStop(0, "rgba(255, 208, 122, 0.5)");
+    glow.addColorStop(0.4, "rgba(255, 176, 80, 0.2)");
+    glow.addColorStop(1, "rgba(255, 176, 80, 0)");
+    ctx.fillStyle = glow;
+    ctx.beginPath(); ctx.arc(cx, cy, 260, 0, Math.PI * 2); ctx.fill();
+
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.strokeStyle = "#d7b680";
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(0, -lh / 2 - 10, 25, Math.PI, 0);
+    ctx.stroke();
+    ctx.fillStyle = "#2a1f14";
+    ctx.roundRect(-lw / 2, -lh / 2, lw, lh, 18);
+    ctx.fill();
+    const gg = ctx.createLinearGradient(0, -lh / 2, 0, lh / 2);
+    gg.addColorStop(0, "#ffe6a8");
+    gg.addColorStop(0.5, "#ffd07a");
+    gg.addColorStop(1, "#ffb347");
+    ctx.fillStyle = gg;
+    ctx.roundRect(-lw / 2 + 5, -lh / 2 + 5, lw - 10, lh - 10, 14);
+    ctx.fill();
+    ctx.globalAlpha = 0.8 + 0.2 * Math.sin(runTime * 6);
+    ctx.fillStyle = "#fff4c4";
+    ctx.beginPath(); ctx.arc(0, 0, 18, 0, Math.PI * 2); ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.restore();
+
+    // title
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillStyle = "#ffd07a";
+    ctx.font = "bold 52px -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
+    ctx.shadowColor = "rgba(255, 208, 122, 0.45)";
+    ctx.shadowBlur = 20;
+    ctx.fillText("Lantern Labyrinth", LOGICAL_W / 2, 340);
+    ctx.shadowBlur = 0;
+
+    ctx.font = "16px -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
+    ctx.fillStyle = "rgba(232, 244, 255, 0.8)";
+    ctx.fillText("Gather the fireflies. Reach the portal. Explore the dark.", LOGICAL_W / 2, 378);
+
+    ctx.font = "14px -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
+    ctx.fillStyle = "rgba(168, 230, 207, 0.85)";
+    ctx.fillText("Move: Arrow keys or WASD    ·    Touch: swipe", LOGICAL_W / 2, 420);
+
+    // blinking prompt
+    const a = 0.5 + 0.5 * Math.sin(blinkT * 3);
+    ctx.globalAlpha = a;
+    ctx.fillStyle = "#e8f4ff";
+    ctx.font = "bold 20px -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
+    ctx.fillText("Press any key / Click to start", LOGICAL_W / 2, 480);
+    ctx.globalAlpha = 1;
+
+    if (highScore > 0) {
+      ctx.font = "13px -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
+      ctx.fillStyle = "rgba(232, 244, 255, 0.55)";
+      ctx.fillText("Best: " + highScore, LOGICAL_W / 2, 520);
+    }
+  }
+
+  function drawLevelDone() {
+    // dim overlay
+    ctx.fillStyle = "rgba(7, 17, 28, 0.55)";
+    ctx.fillRect(0, 0, LOGICAL_W, LOGICAL_H);
+
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillStyle = "#c27bd9";
+    ctx.shadowColor = "rgba(194, 123, 217, 0.5)";
+    ctx.shadowBlur = 16;
+    ctx.font = "bold 44px -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
+    ctx.fillText("Level " + level + " Complete!", LOGICAL_W / 2, LOGICAL_H / 2 - 40);
+    ctx.shadowBlur = 0;
+
+    ctx.font = "18px -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
+    ctx.fillStyle = "rgba(232, 244, 255, 0.85)";
+    ctx.fillText("Time: " + (levelTimeMs / 1000).toFixed(1) + "s   ·   Score: " + score, LOGICAL_W / 2, LOGICAL_H / 2 + 10);
+
+    const a = 0.5 + 0.5 * Math.sin(blinkT * 3);
+    ctx.globalAlpha = a;
+    ctx.font = "bold 18px -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
+    ctx.fillStyle = "#ffd07a";
+    ctx.fillText("Press any key / Click for next level", LOGICAL_W / 2, LOGICAL_H / 2 + 60);
+    ctx.globalAlpha = 1;
+  }
+
+  function drawOver() {
+    ctx.fillStyle = "rgba(7, 17, 28, 0.72)";
+    ctx.fillRect(0, 0, LOGICAL_W, LOGICAL_H);
+
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillStyle = "#ffd07a";
+    ctx.font = "bold 52px -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
+    ctx.fillText("Game Over", LOGICAL_W / 2, LOGICAL_H / 2 - 60);
+
+    ctx.font = "20px -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
+    ctx.fillStyle = "#e8f4ff";
+    ctx.fillText("Final Score: " + score, LOGICAL_W / 2, LOGICAL_H / 2 - 10);
+    ctx.fillStyle = "rgba(168, 230, 207, 0.9)";
+    ctx.fillText("Best: " + highScore, LOGICAL_W / 2, LOGICAL_H / 2 + 20);
+
+    // play again button
+    const btnW = 220, btnH = 56;
+    const bx = (LOGICAL_W - btnW) / 2, by = LOGICAL_H / 2 + 60;
+    playAgainBtn = { x: bx, y: by, w: btnW, h: btnH };
+    const pulse = 0.85 + 0.15 * Math.sin(blinkT * 4);
+    ctx.fillStyle = "rgba(194, 123, 217, " + pulse + ")";
+    ctx.roundRect(bx, by, btnW, btnH, 14);
+    ctx.fill();
+    ctx.strokeStyle = "#f3c8ff";
+    ctx.lineWidth = 2;
+    ctx.roundRect(bx, by, btnW, btnH, 14);
+    ctx.stroke();
+    ctx.fillStyle = "#2a1f14";
+    ctx.font = "bold 22px -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
+    ctx.fillText("PLAY AGAIN", LOGICAL_W / 2, by + btnH / 2 + 1);
+  }
+
+  // ---------- Main loop ----------
+  let last = performance.now();
+  function tick(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    update(dt);
+
+    clear();
+
+    if (state === STATE.PLAY || state === STATE.LEVEL_DONE) {
+      drawMaze();
+      drawFireflies();
+      drawParticles();
+      drawPlayer();
+      drawHUD();
+    } else if (state === STATE.OVER) {
+      drawMaze();
+      drawFireflies();
+      drawPlayer();
+      drawParticles();
+      drawHUD();
+    }
+
+    if (state === STATE.TITLE) drawTitle();
+    if (state === STATE.LEVEL_DONE) drawLevelDone();
+    if (state === STATE.OVER) drawOver();
+
+    requestAnimationFrame(tick);
+  }
+
+  // optional soft fail after too long a level? We'll let it be score-based only.
+  // Trigger game over after level 10 (win) by completing level 10 -> OVER
+  // We'll modify finishLevel to check.
+  const origFinish = finishLevel;
+  finishLevel = function () {
+    levelTimeMs = performance.now() - levelStartMs;
+    const tBonus = Math.max(0, 2000 - Math.floor(levelTimeMs));
+    score += 500 + tBonus;
+    if (score > highScore) highScore = score;
+    if (level >= 10) {
+      state = STATE.OVER;
+    } else {
+      state = STATE.LEVEL_DONE;
+    }
+  };
+
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>
